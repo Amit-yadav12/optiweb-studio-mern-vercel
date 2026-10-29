@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f7f8fa" />
+    <meta name="description" content="OptiWeb Studio — optimize images, inspect CSS font-loading rules, and measure real asset savings." />
+    <meta property="og:title" content="OptiWeb Studio — Make every byte count" />
+    <meta property="og:description" content="A focused developer workspace for image optimization and web font analysis." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>OptiWeb Studio — Make every byte count</title>
+    <script>
+      (() => {
+        try {
+          const saved = localStorage.getItem('ow-theme');
+          const resolved = saved === 'light' || saved === 'dark' ? saved : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+          document.documentElement.setAttribute('data-theme', resolved);
+        } catch (_) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
+  </head>
+  <body class="antialiased">
+    <a href="#main" class="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-100 focus:rounded-md focus:border focus:border-accent focus:bg-surface focus:px-3 focus:py-2 focus:text-sm focus:text-ink">Skip to main content</a>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
