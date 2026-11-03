@@ -10,7 +10,7 @@ export const GET = routeWithParams<{ id: string }>(async (_req, ctx, { id }) => 
   return jsonOk(
     {
       job: {
-        id: detail.job.id,
+        id: detail.job._id,
         kind: detail.job.kind,
         status: detail.job.status,
         label: detail.job.label,
