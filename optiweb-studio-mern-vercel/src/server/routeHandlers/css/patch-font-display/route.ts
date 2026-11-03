@@ -7,7 +7,7 @@ import { cssPatchSchema } from "@/server/validators";
 /** POST /api/v1/css/patch-font-display — parses, patches, reports exact deltas. */
 export const POST = route(async (req, ctx) => {
   const { css, policy } = await parseJson(req, cssPatchSchema);
-  const patched = patchFontDisplay(css, policy);
+  const patched = patchFontDisplay(css, policy ?? "swap");
 
   const stored = await persistJob({
     sessionId: ctx.sessionId,

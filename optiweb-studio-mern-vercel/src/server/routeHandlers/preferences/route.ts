@@ -23,7 +23,7 @@ export const GET = route(async (_req, ctx) => {
 
 /** PUT /api/v1/preferences */
 export const PUT = route(async (req, ctx) => {
-  const input = await parseJson(req, preferencesSchema);
+  const input = await parseJson(req, preferencesSchema) as Preferences;
   const saved = await savePreferences(ctx.sessionId, {
     ...input,
     updatedAt: new Date().toISOString(),

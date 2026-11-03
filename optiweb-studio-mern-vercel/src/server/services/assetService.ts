@@ -5,8 +5,6 @@
  * from a heuristic (a threshold) or a hard fact (parsed metadata). The analyzer
  * never infers page usage: it only sees the file you give it.
  */
-import sharp from "sharp";
-import { limits } from "@/server/config/env";
 import { sniffImage } from "@/server/services/imageService";
 import { countFontDisplayGaps } from "@/server/services/cssService";
 import type { AssetAnalysisFile, AssetFinding, AssetAnalysisResponse } from "@/types/domain";

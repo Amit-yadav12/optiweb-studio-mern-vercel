@@ -20,10 +20,10 @@ const FALLBACK_PREFS: Preferences = {
   fontDisplayPolicy: "swap", analyzerThresholdKb: 300, reduceMotion: false, updatedAt: null,
 };
 
-type LimitsResponse = { maxFileBytes: number; maxFilesPerRequest: number; maxDecodedPixels: number; artifactTtlHours: number };
+type LimitsResponse = { maxFileBytes: number; maxFilesPerRequest: number; maxDecodedPixels: number; artifactTtlHours: number; avifSupported: boolean };
 
 function useLimits() {
-  const [limits, setLimits] = useState<LimitsResponse>({ maxFileBytes: 1_000_000, maxFilesPerRequest: 4, maxDecodedPixels: 24_000_000, artifactTtlHours: 720 });
+  const [limits, setLimits] = useState<LimitsResponse>({ maxFileBytes: 1_000_000, maxFilesPerRequest: 4, maxDecodedPixels: 24_000_000, artifactTtlHours: 720, avifSupported: false });
   useEffect(() => { api.get<LimitsResponse>("/api/v1/limits").then(setLimits).catch(() => undefined); }, []);
   return limits;
 }
@@ -48,7 +48,7 @@ function PageFrame({ title, context, eyebrow, description, maxWidth = "max-w-6xl
 export function ImagePage() {
   const limits = useLimits();
   return <PageFrame title="Image Optimizer" context="Convert, compress and compare — measured from real output" eyebrow="Tool" description="Reduce image weight while preserving the visual quality you need." actions={<ButtonLink href="/app/history" variant="secondary" size="sm">Past results</ButtonLink>}>
-    <ImageOptimizer limits={{ maxFileMb: Math.max(1, Math.floor(limits.maxFileBytes / 1024 / 1024)), maxFiles: limits.maxFilesPerRequest, maxDecodedPixels: limits.maxDecodedPixels }} />
+    <ImageOptimizer limits={{ maxFileMb: Math.max(1, Math.floor(limits.maxFileBytes / 1024 / 1024)), maxFiles: limits.maxFilesPerRequest, maxDecodedPixels: limits.maxDecodedPixels, avifSupported: limits.avifSupported }} />
   </PageFrame>;
 }
 

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { FileSearch, Info, ScanSearch, TriangleAlert, Wand2 } from "lucide-react";
-import { Button, ButtonLink, buttonClass } from "@/components/ui/Button";
+import { Button, ButtonLink } from "@/components/ui/Button";
 import { EmptyState, ErrorState, ProgressIndicator, StatusBadge, useToast} from "@/components/ui/Feedback";
 import { statusToneFor } from "@/lib/status";
 import { Panel, PanelHeader, StatStrip } from "@/components/ui/Layout";
