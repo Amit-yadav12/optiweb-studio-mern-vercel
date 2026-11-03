@@ -79,7 +79,8 @@ function bridge(handler: WebHandler) {
 function bridgeDynamic(handler: DynamicWebHandler) {
   return async (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
     try {
-      const result = await handler(toWebRequest(req), { params: Promise.resolve({ id: req.params.id }) });
+      const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const result = await handler(toWebRequest(req), { params: Promise.resolve({ id }) });
       await sendWebResponse(result, res);
     } catch (error) { next(error); }
   };
@@ -171,6 +172,7 @@ app.get(/.*/, (_req, res) => {
 });
 
 app.use((error: unknown, _req: ExpressRequest, res: ExpressResponse, _next: NextFunction) => {
+  void _next; // Keep four arguments so Express recognizes error middleware.
   const maybe = error as { status?: number; statusCode?: number; type?: string; message?: string };
   if (maybe.type === "entity.too.large") {
     res.status(413).json({ ok: false, error: { code: "payload_too_large", message: "Request exceeds the deployment-safe 4.1 MB body limit.", hint: "Use a smaller file or split the batch." }, meta: { requestId: randomUUID() } });

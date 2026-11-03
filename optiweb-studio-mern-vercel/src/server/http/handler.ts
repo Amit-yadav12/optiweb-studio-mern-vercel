@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ZodError, type ZodType } from "zod";
+import { ZodError, type ZodTypeAny, type output } from "zod";
 import { ApiError, type ApiErrorCode, validationError } from "@/server/http/errors";
 import { consumeRateLimit, type RateLimitResult } from "@/server/middleware/rateLimit";
 import type { RateLimitBucket } from "@/server/config/env";
@@ -213,7 +213,7 @@ async function execute(
   }
 }
 
-export function route<T>(
+export function route(
   handler: (req: Request, ctx: RouteContext) => Promise<Response>,
   options: HandlerOptions = {},
 ): (req: Request) => Promise<Response> {
@@ -227,7 +227,7 @@ export function flattenZod(error: ZodError): Array<{ path: string; message: stri
   }));
 }
 
-export async function parseJson<T>(req: Request, schema: ZodType<T>): Promise<T> {
+export async function parseJson<T extends ZodTypeAny>(req: Request, schema: T): Promise<output<T>> {
   let raw: unknown;
   try {
     raw = await req.json();
