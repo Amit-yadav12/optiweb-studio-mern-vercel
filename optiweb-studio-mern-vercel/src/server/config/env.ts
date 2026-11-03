@@ -18,9 +18,9 @@ export const limits = {
   /**
    * Hard cap for the sum of all file bodies in one request.
    *
-   * Serverless hosts cap the entire request body rather than each file. Vercel Functions
-   * reject bodies above 4.5 MB before application code runs. This budget leaves headroom
-   * for multipart framing and fields so requests fail in app code, not at the edge.
+   * Serverless hosts cap the entire request body rather than each file. Netlify's
+   * Base64-encoded binary requests have an effective ~4.5 MB payload budget. This
+   * lower budget leaves headroom for multipart framing and fields.
    */
   maxBatchBytes: num(process.env.OW_MAX_BATCH_MB, 3.8) * 1024 * 1024,
   /** Files accepted per request. */
@@ -40,8 +40,8 @@ export const limits = {
   /** Maximum single artifact size, kept below serverless response-body limits. */
   maxArtifactBytes: num(process.env.OW_MAX_ARTIFACT_MB, 3.5) * 1024 * 1024,
   /**
-   * Hard cap for a generated ZIP. Keep below Vercel’s 4.5 MB function response-body ceiling:
-   * serverless responses share the ~4.5 MB payload ceiling with requests.
+   * Hard cap for a generated ZIP. This buffered response budget stays below
+   * Netlify's current 6 MB Function payload ceiling, including Base64 overhead.
    */
   maxZipBytes: num(process.env.OW_MAX_ZIP_MB, 3.5) * 1024 * 1024,
   /** Artifact retention window. */

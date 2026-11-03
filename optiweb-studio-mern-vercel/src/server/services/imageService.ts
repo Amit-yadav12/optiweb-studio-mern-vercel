@@ -13,6 +13,17 @@ import type { OptimizationPolicy } from "@/server/config/env";
 sharp.cache(false);
 sharp.concurrency(1);
 
+let avifSupportProbe: Promise<boolean> | null = null;
+/** Probe the actual linked libvips encoder rather than assuming AVIF from the package version. */
+export function supportsAvif(): Promise<boolean> {
+  avifSupportProbe ??= sharp({ create: { width: 1, height: 1, channels: 3, background: "white" } })
+    .avif({ quality: 50, effort: 0 })
+    .toBuffer()
+    .then(() => true)
+    .catch(() => false);
+  return avifSupportProbe;
+}
+
 const MIME_BY_FORMAT: Record<Exclude<ImageFormat, "original">, string> = {
   webp: "image/webp",
   avif: "image/avif",

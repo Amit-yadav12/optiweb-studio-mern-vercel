@@ -1,7 +1,7 @@
 # OptiWeb Studio — design tokens & contrast evidence
 
-Tokens live in `src/app/globals.css`. Both palettes were checked with the WCAG 2.1 relative
-luminance formula; the numbers below are computed, not estimated.
+Tokens live in `src/styles.css`. The light palette follows the supplied OptiWeb reference tokens; dark colors are tuned independently. Contrast ratios below were computed using the WCAG 2.1 relative
+luminance formula, not estimated. `DESIGN.md` was not included in the checkout at implementation time, so this file and the existing application are the available design references.
 
 ```
 contrast(A, B) = (L(lighter) + 0.05) / (L(darker) + 0.05)

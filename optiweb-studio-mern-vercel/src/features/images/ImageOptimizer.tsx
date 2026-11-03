@@ -29,6 +29,7 @@ export type OptimizerLimits = {
   maxFileMb: number;
   maxFiles: number;
   maxDecodedPixels: number;
+  avifSupported: boolean;
 };
 
 const FORMATS = [
@@ -71,14 +72,14 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
       .then((prefs) => {
         if (restored.current) return;
         restored.current = true;
-        setFormat(prefs.defaultImageFormat);
+        setFormat(prefs.defaultImageFormat === "avif" && !limits.avifSupported ? "webp" : prefs.defaultImageFormat);
         setQuality(prefs.defaultQuality);
         if (prefs.defaultMaxWidth) setMaxWidth(String(prefs.defaultMaxWidth));
       })
       .catch(() => {
         /* Defaults stay built-in when storage is unavailable. */
       });
-  }, []);
+  }, [limits.avifSupported]);
 
   /* A file staged by the Asset Analyzer lands here without a re-upload. */
   useEffect(() => {
@@ -362,27 +363,33 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
               label="Output format"
               value={format}
               onChange={setFormat}
-              options={FORMATS.map((entry) => ({ value: entry.value, label: entry.label }))}
+              options={FORMATS.filter((entry) => entry.value !== "avif" || limits.avifSupported).map((entry) => ({ value: entry.value, label: entry.label }))}
             />
           </Field>
-          <Field
-            label="Quality"
-            htmlFor="quality"
-            hint={`Higher keeps more detail. Current setting: ${quality} — measured savings update after conversion.`}
-            trailing={<span className="font-mono text-xs text-muted tnum">{quality}</span>}
-          >
-            <input
-              id="quality"
-              type="range"
-              min={30}
-              max={100}
-              step={1}
-              value={quality}
-              onChange={(event) => setQuality(Number(event.target.value))}
-              className="mt-2 h-1.5 w-full accent-accent"
-              aria-valuetext={`${quality} of 100`}
-            />
-          </Field>
+          {format === "png" ? (
+            <div className="rounded-md border border-line bg-surface-sunken px-3 py-3 text-sm text-ink-soft" role="status">
+              PNG uses lossless compression; the quality slider does not apply to this format.
+            </div>
+          ) : (
+            <Field
+              label="Quality"
+              htmlFor="quality"
+              hint={`Quality applies to lossy JPEG, WebP and AVIF outputs. PNG stays lossless. Current: ${quality}.`}
+              trailing={<span className="font-mono text-xs text-muted tnum">{quality}</span>}
+            >
+              <input
+                id="quality"
+                type="range"
+                min={30}
+                max={100}
+                step={1}
+                value={quality}
+                onChange={(event) => setQuality(Number(event.target.value))}
+                className="mt-2 h-1.5 w-full accent-accent"
+                aria-valuetext={`${quality} of 100`}
+              />
+            </Field>
+          )}
         </div>
         {showAdvanced ? (
           <div className="animate-fade-up mt-5 grid gap-4 border-t border-line pt-5 sm:grid-cols-2">

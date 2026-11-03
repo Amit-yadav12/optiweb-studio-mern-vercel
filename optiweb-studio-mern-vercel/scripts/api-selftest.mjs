@@ -65,7 +65,7 @@ function multipart(parts) {
   };
 }
 
-async function makeImage(width, height, color, format = "jpeg") {
+async function makeImage(width, height, color) {
   return sharp({
     create: { width, height, channels: 3, background: color },
   })
@@ -222,7 +222,7 @@ check(
   envSource.includes("OW_MAX_BATCH_MB"),
 );
 check(
-  "Vercel body-limit guidance is documented",
+  "Netlify binary body-limit guidance is documented",
   (await fs.readFile(new URL("../docs/deployment.md", import.meta.url), "utf8")).includes("4.5 MB"),
 );
 
