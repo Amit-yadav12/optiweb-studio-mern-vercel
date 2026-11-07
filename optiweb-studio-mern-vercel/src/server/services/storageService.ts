@@ -249,7 +249,7 @@ export async function persistJob(params: {
     });
     if (artifactDocs.length) await Artifact.insertMany(artifactDocs, { ordered: true });
     return { jobId: job._id, artifacts, persisted: true };
-  } catch (error) {
+  } catch {
     // Avoid orphaning metadata if artifact insertion fails after the job document
     // was created. TTL cleanup is only a backup; this is the immediate rollback.
     try {
@@ -260,7 +260,7 @@ export async function persistJob(params: {
     } catch {
       // Preserve the original persistence failure; periodic TTL cleanup remains active.
     }
-    console.error("[storage] MongoDB persistence unavailable:", error instanceof Error ? error.message : "unknown error");
+    console.error("[storage] MongoDB persistence unavailable; job/artifact was not retained.");
     return { jobId: null, artifacts: new Map(), persisted: false };
   }
 }

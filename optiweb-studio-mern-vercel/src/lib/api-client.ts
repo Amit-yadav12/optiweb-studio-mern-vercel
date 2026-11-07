@@ -57,12 +57,14 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
   }
 
   const text = await response.text();
-  let parsed: unknown = null;
+  let parsed: unknown;
   try {
     parsed = text ? JSON.parse(text) : null;
   } catch {
-    throw new ApiClientError("The server returned an unreadable response.", {
+    const requestId = response.headers.get("x-request-id");
+    throw new ApiClientError(`The API returned a non-JSON response (HTTP ${response.status}).`, {
       code: "bad_response",
+      hint: requestId ? `Reference ${requestId}; retry or share this reference with support.` : "Retry once. If the problem persists, contact support.",
       status: response.status,
     });
   }

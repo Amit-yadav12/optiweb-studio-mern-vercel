@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { storageUnavailable } from "@/server/http/errors";
 
 type Cache = { connection: typeof mongoose | null; promise: Promise<typeof mongoose> | null };
 const globalCache = globalThis as typeof globalThis & { __optiwebMongo?: Cache };
@@ -7,7 +8,7 @@ const cache: Cache = (globalCache.__optiwebMongo ??= { connection: null, promise
 /** Reuse connections across warm serverless invocations. */
 export async function connectMongo(): Promise<typeof mongoose> {
   const uri = process.env.MONGODB_URI ?? process.env.MONGO_URL;
-  if (!uri) throw new Error("MONGODB_URI is not configured.");
+  if (!uri) throw storageUnavailable("MongoDB Atlas is not configured.", "Set MONGODB_URI in the server environment, then retry.");
   if (cache.connection?.connection.readyState === 1) return cache.connection;
   if (!cache.promise) {
     cache.promise = mongoose.connect(uri, {
@@ -19,9 +20,9 @@ export async function connectMongo(): Promise<typeof mongoose> {
   try {
     cache.connection = await cache.promise;
     return cache.connection;
-  } catch (error) {
+  } catch {
     cache.promise = null;
-    throw error;
+    throw storageUnavailable("MongoDB connection failed.", "Check the Atlas URI, user permissions, and network access rules.");
   }
 }
 
@@ -31,7 +32,7 @@ export async function probeMongo(): Promise<{ connected: boolean; latencyMs: num
     await connectMongo();
     await mongoose.connection.db?.admin().ping();
     return { connected: true, latencyMs: Date.now() - started };
-  } catch (error) {
+  } catch {
     return { connected: false, latencyMs: null, error: (process.env.MONGODB_URI ?? process.env.MONGO_URL) ? "MongoDB connection failed." : "MONGODB_URI is not configured." };
   }
 }

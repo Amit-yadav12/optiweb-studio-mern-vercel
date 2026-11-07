@@ -137,7 +137,6 @@ function requestPublicOnce(url: URL, maxBytes: number, timeoutMs: number): Promi
   return new Promise((resolve, reject) => {
     let settled = false;
     let timedOut = false;
-    let timer: ReturnType<typeof setTimeout>;
 
     const resolveOnce = (value: PublicFetchResult) => {
       if (settled) return;
@@ -213,7 +212,7 @@ function requestPublicOnce(url: URL, maxBytes: number, timeoutMs: number): Promi
       ? https.request(requestOptions, onResponse)
       : http.request(requestOptions, onResponse);
 
-    timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       timedOut = true;
       request.destroy(new Error("AUDIT_TIMEOUT"));
     }, Math.max(1, timeoutMs));

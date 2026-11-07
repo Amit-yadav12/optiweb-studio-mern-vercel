@@ -1,13 +1,15 @@
 import { jsonOk, route } from "@/server/http/handler";
 import { limits, imageFormats, fontDisplayValues } from "@/server/config/env";
-
+import { supportsAvif } from "@/server/services/imageService";
 
 /**
  * GET /api/v1/limits — the numbers the UI copy must match.
- * Public, no secrets. Lets the client refuse an over-budget batch before upload.
+ * Public, no secrets. AVIF is offered only when the current libvips runtime
+ * successfully encodes a tiny probe image.
  */
-export const GET = route(async (_req, ctx) =>
-  jsonOk(
+export const GET = route(async (_req, ctx) => {
+  const avifSupported = await supportsAvif();
+  return jsonOk(
     {
       maxFileBytes: limits.maxFileBytes,
       maxBatchBytes: limits.maxBatchBytes,
@@ -20,9 +22,10 @@ export const GET = route(async (_req, ctx) =>
       artifactTtlHours: limits.artifactTtlHours,
       auditMaxResources: limits.auditMaxResources,
       auditMaxHtmlBytes: limits.auditMaxHtmlBytes,
-      imageFormats,
+      imageFormats: avifSupported ? imageFormats : imageFormats.filter((format) => format !== "avif"),
+      avifSupported,
       fontDisplayValues,
     },
     ctx,
-  ),
-);
+  );
+});

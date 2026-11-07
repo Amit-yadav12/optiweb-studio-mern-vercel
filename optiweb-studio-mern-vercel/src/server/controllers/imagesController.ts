@@ -54,11 +54,17 @@ async function processOne(
   const startedAt = Date.now();
   try {
     const outcome = await optimizeWithPolicy({
-        filename: file.filename,
-        buffer: file.buffer,
-        settings,
-      });
-      return {
+      filename: file.filename,
+      buffer: file.buffer,
+      settings,
+    });
+    if (outcome.output.byteLength > limits.maxArtifactBytes) {
+      throw payloadTooLarge(
+        `The generated output for "${sanitizeFilename(file.filename)}" exceeds the configured artifact limit.`,
+        "Resize the image or use a more compact output format, then retry.",
+      );
+    }
+    return {
         result: {
           id: crypto.randomUUID(),
           filename: sanitizeFilename(file.filename),

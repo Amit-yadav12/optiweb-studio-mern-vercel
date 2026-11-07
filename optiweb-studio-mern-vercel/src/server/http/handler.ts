@@ -150,11 +150,8 @@ function errorResponse(error: unknown, ctx: RouteContext): Response {
       : new ApiError(500, "internal_error", "The request could not be completed.");
 
   if (!(error instanceof ApiError)) {
-    // Unexpected errors are logged with type + message only. No user payload,
-    // no stack traces with absolute paths, no file contents.
-    console.error(
-      `[api] request ${ctx.requestId} failed: ${error instanceof Error ? `${error.name}: ${error.message}` : "unknown error"}`,
-    );
+    // Do not log exception messages: drivers may include deployment details.
+    console.error(`[api] request ${ctx.requestId} failed (${error instanceof Error ? error.name : "unknown error"})`);
   }
 
   const body: ApiFailure = {
@@ -190,7 +187,8 @@ async function execute(
   options: HandlerOptions,
   run: (ctx: RouteContext) => Promise<Response>,
 ): Promise<Response> {
-  const requestId = randomUUID();
+  const suppliedRequestId = req.headers.get("x-request-id") ?? "";
+  const requestId = /^[a-zA-Z0-9-]{8,64}$/.test(suppliedRequestId) ? suppliedRequestId : randomUUID();
   const { sessionId, issued } = resolveSession(req);
   const ctx: RouteContext = { requestId, sessionId, sessionIssued: issued };
 
@@ -213,7 +211,7 @@ async function execute(
   }
 }
 
-export function route<T>(
+export function route(
   handler: (req: Request, ctx: RouteContext) => Promise<Response>,
   options: HandlerOptions = {},
 ): (req: Request) => Promise<Response> {
