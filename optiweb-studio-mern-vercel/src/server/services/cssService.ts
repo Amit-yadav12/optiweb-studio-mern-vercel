@@ -192,7 +192,7 @@ export function analyzeCss(css: string, policy: FontDisplayPolicy): CssAnalysisR
  * UI can highlight exactly what moved.
  */
 /** Service-level shape: the controller adds job/artifact/persistence fields. */
-export type CssPatchResult = Omit<CssPatchResponse, "jobId" | "artifactId" | "persisted">;
+export type CssPatchResult = Omit<CssPatchResponse, "jobId" | "artifactId" | "persisted" | "storage">;
 
 export function patchFontDisplay(css: string, policy: FontDisplayPolicy): CssPatchResult {
   const analysis = analyzeCss(css, policy);

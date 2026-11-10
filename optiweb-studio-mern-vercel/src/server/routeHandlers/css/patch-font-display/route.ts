@@ -1,6 +1,6 @@
 import { jsonOk, parseJson, route } from "../../../http/handler.js";
 import { patchFontDisplay } from "../../../services/cssService.js";
-import { persistJob } from "../../../services/storageService.js";
+import { persistJob, storageOutcome } from "../../../services/storageService.js";
 import { cssPatchSchema } from "../../../validators/index.js";
 
 
@@ -39,7 +39,8 @@ export const POST = route(async (req, ctx) => {
     ],
   });
 
-  // Replace the placeholder artifact id with the persisted one (if any).
+  // `stored.artifacts` is empty when storage failed, so `artifactId` is null
+  // unless the patched stylesheet can really be downloaded.
   const [artifactId] = Array.from(stored.artifacts.keys());
-  return jsonOk({ ...patched, jobId: stored.jobId ?? "", artifactId: artifactId ?? null, persisted: stored.persisted }, ctx);
+  return jsonOk({ ...patched, jobId: stored.jobId ?? "", artifactId: artifactId ?? null, persisted: stored.persisted, storage: storageOutcome(stored) }, ctx);
 }, { bucket: "css/analyze" });

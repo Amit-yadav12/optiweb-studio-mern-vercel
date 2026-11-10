@@ -1,7 +1,7 @@
 import { jsonOk, route } from "../../../http/handler.js";
 import { readMultipart } from "../../../http/multipart.js";
 import { analyzeAssets } from "../../../services/assetService.js";
-import { persistJob } from "../../../services/storageService.js";
+import { persistJob, storageOutcome } from "../../../services/storageService.js";
 import { badRequest } from "../../../http/errors.js";
 
 
@@ -44,5 +44,5 @@ export const POST = route(async (req, ctx) => {
   });
 
   if (!analysis.files.length) throw badRequest("No analyzable files were received.");
-  return jsonOk({ ...analysis, jobId: stored.jobId ?? "", persisted: stored.persisted }, ctx);
+  return jsonOk({ ...analysis, jobId: stored.jobId ?? "", persisted: stored.persisted, storage: storageOutcome(stored) }, ctx);
 }, { bucket: "assets/analyze" });

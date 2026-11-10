@@ -1,7 +1,7 @@
 import { jsonOk, parseJson, route } from "../../http/handler.js";
 import { auditRequestSchema } from "../../validators/index.js";
 import { runWebsiteAudit } from "../../services/auditService.js";
-import { persistJob } from "../../services/storageService.js";
+import { persistJob, storageOutcome } from "../../services/storageService.js";
 
 
 /** POST /api/v1/audits — SSRF-safe document fetch + asset discovery. */
@@ -39,5 +39,5 @@ export const POST = route(async (req, ctx) => {
   });
 
   const [artifactId] = Array.from(stored.artifacts.keys());
-  return jsonOk({ ...report, jobId: stored.jobId ?? "", artifactId: artifactId ?? null, persisted: stored.persisted }, ctx);
+  return jsonOk({ ...report, jobId: stored.jobId ?? "", artifactId: artifactId ?? null, persisted: stored.persisted, storage: storageOutcome(stored) }, ctx);
 }, { bucket: "audits" });

@@ -9,7 +9,7 @@ import {
   optimizeWithPolicy,
   sanitizeFilename,
 } from "../services/imageService.js";
-import { persistJob } from "../services/storageService.js";
+import { persistJob, storageOutcome } from "../services/storageService.js";
 import type { ImageOptimizeResponse, ImageResult } from "../../types/domain.js";
 
 type Processed = { result: ImageResult; output: Buffer | null };
@@ -67,6 +67,7 @@ async function processOne(
     return {
         result: {
           id: crypto.randomUUID(),
+          artifactId: null,
           filename: sanitizeFilename(file.filename),
           outputFilename: outcome.filename,
           status: "completed",
@@ -87,6 +88,7 @@ async function processOne(
     return {
       result: {
         id: crypto.randomUUID(),
+        artifactId: null,
         filename: sanitizeFilename(file.filename),
         outputFilename: sanitizeFilename(file.filename),
         status: "failed",
@@ -182,22 +184,28 @@ export async function optimizeUploadedImages(req: Request, ctx: RouteContext): P
     })),
   });
 
-  // When persistence succeeds, replace placeholder ids with the stored artifact
-  // ids so `/api/v1/artifacts/:id` can stream the bytes back later.
+  // Only a stored output file gets an `artifactId`, the ID that
+  // `/api/v1/artifacts/:id` serves. When storage failed, `stored.artifacts` is
+  // empty and every result keeps `artifactId: null`, so the response never
+  // names a download that does not exist.
   const artifactIds = Array.from(stored.artifacts.keys());
   let cursor = 0;
   const results = processed.map(({ result }) => {
     if (result.status !== "completed" || !stored.persisted) return result;
     const id = artifactIds[cursor];
     cursor += 1;
-    return id ? { ...result, id } : result;
+    return id ? { ...result, id, artifactId: id } : result;
   });
 
+  // `status` describes the conversion and `storage` describes persistence.
+  // They are reported separately so a client can tell "converted but not
+  // stored" from "conversion failed".
   const body: ImageOptimizeResponse = {
     jobId: stored.jobId ?? "",
     status,
     results,
     persisted: stored.persisted,
+    storage: storageOutcome(stored),
     totals: { ...totals, savingsPercent },
   };
 
