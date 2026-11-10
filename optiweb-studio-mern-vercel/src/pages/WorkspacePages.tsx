@@ -10,7 +10,7 @@ import { FontOptimizer } from "@/features/fonts/FontOptimizer";
 import { AssetAnalyzer } from "@/features/assets/AssetAnalyzer";
 import { WebsiteAudit } from "@/features/audit/WebsiteAudit";
 import { SettingsForm } from "@/features/settings/SettingsForm";
-import { api } from "@/lib/api-client";
+import { ApiClientError, api } from "@/lib/api-client";
 import { formatBytes, formatNumber, formatRelativeTime } from "@/lib/format";
 import { statusToneFor } from "@/lib/status";
 import type { HistoryEntry, HistoryPage as HistoryPageData, Preferences } from "@/types/domain";
@@ -80,25 +80,29 @@ export function SettingsPage() {
   </PageFrame>;
 }
 
+/** The API's own hint for an error. For a storage failure it names the actual cause and the fix. */
+const hintOf = (err: unknown): string | null => (err instanceof ApiClientError ? err.hint ?? null : null);
+
 function useHistoryData(query: string) {
   const [data, setData] = useState<(HistoryPageData & { summary?: { jobs: number; savedBytes: number; inputBytes: number; files: number; completed: number } }) | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [hint, setHint] = useState<string | null>(null);
   const load = useCallback(async () => {
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setHint(null);
     try { setData(await api.get(`/api/v1/history${query ? `?${query}` : ""}`)); }
-    catch (err) { setError(err instanceof Error ? err.message : "History could not be loaded."); }
+    catch (err) { setError(err instanceof Error ? err.message : "History could not be loaded."); setHint(hintOf(err)); }
     finally { setBusy(false); }
   }, [query]);
   useEffect(() => { void load(); }, [load]);
-  return { data, busy, error, reload: load };
+  return { data, busy, error, hint, reload: load };
 }
 
 const KIND_LABEL: Record<string, string> = { "image.optimize": "Images", "css.font-display": "CSS", "asset.analyze": "Analysis", "site.audit": "Audit" };
 const KIND_ICON: Record<string, typeof ImageDown> = { "image.optimize": ImageDown, "css.font-display": FileCode2, "asset.analyze": ScanSearch, "site.audit": Globe };
 
 export function OverviewPage() {
-  const { data, busy, error } = useHistoryData("page=1&pageSize=6");
+  const { data, busy, error, hint } = useHistoryData("page=1&pageSize=6");
   const summary = data?.summary;
   return <WorkspaceShell title="Overview" context="Your optimization workspace" actions={<ButtonLink href="/app/images" variant="primary" size="sm" leading={<ImageDown className="size-3.5" />}>New optimization</ButtonLink>}>
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
@@ -111,7 +115,7 @@ export function OverviewPage() {
       </div>
       <Panel>
         <PanelHeader title="Your activity" description="Metrics are based on jobs stored in this browser session." actions={<ButtonLink href="/app/history" variant="secondary" size="sm">View history</ButtonLink>} />
-        {error ? <ErrorState title="History unavailable" message={error} hint="Core tools can still work, but persistence requires MongoDB configuration." /> : busy ? <ProgressIndicator label="Loading your session history…" /> : <>
+        {error ? <ErrorState title="History unavailable" message={error} hint={hint ?? "The other tools still work without History."} /> : busy ? <ProgressIndicator label="Loading your session history…" /> : <>
           <StatStrip items={[{ label: "Jobs", value: formatNumber(summary?.jobs ?? 0) }, { label: "Files", value: formatNumber(summary?.files ?? 0) }, { label: "Bytes saved", value: formatBytes(summary?.savedBytes ?? 0) }]} />
           {data?.entries.length ? <div className="mt-5"><HistoryTable entries={data.entries} /></div> : <div className="mt-5"><EmptyState title="No optimization jobs yet" description="Your completed image, CSS, asset, and audit jobs will appear here." action={<ButtonLink href="/app/images" variant="primary" size="sm">Optimize your first image</ButtonLink>} /></div>}
         </>}
@@ -141,7 +145,7 @@ export function HistoryPage() {
   if (kind !== "all") query.set("kind", kind);
   if (status !== "all") query.set("status", status);
   query.set("page", searchParams.get("page") ?? "1"); query.set("pageSize", "10");
-  const { data, busy, error, reload } = useHistoryData(query.toString());
+  const { data, busy, error, hint, reload } = useHistoryData(query.toString());
   const applyFilters = () => setSearchParams((previous) => { const next = new URLSearchParams(previous); if (search.trim()) next.set("q", search.trim()); else next.delete("q"); if (kind !== "all") next.set("kind", kind); else next.delete("kind"); if (status !== "all") next.set("status", status); else next.delete("status"); next.delete("page"); return next; });
   const clear = async () => { if (!window.confirm("Clear all history and stored artifacts for this session? This cannot be undone.")) return; try { await api.del("/api/v1/history"); await reload(); } catch (err) { window.alert(err instanceof Error ? err.message : "History could not be cleared."); } };
   return <PageFrame title="History" context="Previously completed jobs in this session" eyebrow="Records" description="Search and review measured results from your optimization jobs." maxWidth="max-w-7xl" actions={<Button variant="secondary" size="sm" onClick={clear}>Clear history</Button>}>
@@ -152,7 +156,7 @@ export function HistoryPage() {
         <div><label className="mb-1.5 block text-xs font-medium text-ink-soft" htmlFor="history-status">Status</label><select id="history-status" value={status} onChange={(event) => setStatus(event.target.value)} className="h-10 w-full border border-line-strong bg-surface px-3 text-sm text-ink"><option value="all">All statuses</option><option value="completed">Completed</option><option value="partial">Partial</option><option value="failed">Failed</option></select></div>
         <Button variant="primary" onClick={applyFilters}>Apply</Button>
       </div>
-      <div className="mt-5">{error ? <ErrorState title="Could not load history" message={error} /> : busy ? <ProgressIndicator label="Loading history…" /> : data?.entries.length ? <HistoryTable entries={data.entries} /> : <EmptyState title="Nothing matches these filters" description="Try another search or run a new optimization." action={<ButtonLink href="/app/images" variant="secondary" size="sm">Optimize an image</ButtonLink>} />}</div>
+      <div className="mt-5">{error ? <ErrorState title="Could not load history" message={error} hint={hint ?? undefined} /> : busy ? <ProgressIndicator label="Loading history…" /> : data?.entries.length ? <HistoryTable entries={data.entries} /> : <EmptyState title="Nothing matches these filters" description="Try another search or run a new optimization." action={<ButtonLink href="/app/images" variant="secondary" size="sm">Optimize an image</ButtonLink>} />}</div>
       {data && data.pageCount > 1 ? <div className="mt-4 flex items-center justify-between border-t border-line pt-4"><span className="text-xs text-muted">Page {data.page} of {data.pageCount} · {data.total} jobs</span><div className="flex gap-2"><Button disabled={data.page <= 1} variant="secondary" size="sm" onClick={() => setSearchParams((old) => { const p = new URLSearchParams(old); p.set("page", String(data.page - 1)); return p; })}>Previous</Button><Button disabled={data.page >= data.pageCount} variant="secondary" size="sm" onClick={() => setSearchParams((old) => { const p = new URLSearchParams(old); p.set("page", String(data.page + 1)); return p; })}>Next</Button></div></div> : null}
     </Panel>
   </PageFrame>;
@@ -161,11 +165,11 @@ export function HistoryPage() {
 export function HistoryDetailPage() {
   const { id = "" } = useParams();
   const [data, setData] = useState<{ job: { id: string; kind: string; status: string; label: string; fileCount: number; inputBytes: number; outputBytes: number; savedBytes: number; note: string | null; createdAt: string }; items: Array<{ id: string; filename: string; outputFilename: string | null; status: string; inputBytes: number; outputBytes: number; savedBytes: number; outputFormat: string | null; message: string | null; hasArtifact: boolean }> } | null>(null);
-  const [error, setError] = useState<string | null>(null); const [busy, setBusy] = useState(true);
-  useEffect(() => { let active = true; setBusy(true); api.get<typeof data>(`/api/v1/history/${id}`).then((result) => { if (active) setData(result); }).catch((err) => { if (active) setError(err instanceof Error ? err.message : "Could not load job."); }).finally(() => { if (active) setBusy(false); }); return () => { active = false; }; }, [id]);
-  const remove = async () => { if (!window.confirm("Delete this job and its stored artifacts?")) return; try { await api.del(`/api/v1/history/${id}`); window.location.href = "/app/history"; } catch (err) { setError(err instanceof Error ? err.message : "Could not delete job."); } };
+  const [error, setError] = useState<string | null>(null); const [hint, setHint] = useState<string | null>(null); const [busy, setBusy] = useState(true);
+  useEffect(() => { let active = true; setBusy(true); api.get<typeof data>(`/api/v1/history/${id}`).then((result) => { if (active) setData(result); }).catch((err) => { if (active) { setError(err instanceof Error ? err.message : "Could not load job."); setHint(hintOf(err)); } }).finally(() => { if (active) setBusy(false); }); return () => { active = false; }; }, [id]);
+  const remove = async () => { if (!window.confirm("Delete this job and its stored artifacts?")) return; try { await api.del(`/api/v1/history/${id}`); window.location.href = "/app/history"; } catch (err) { setError(err instanceof Error ? err.message : "Could not delete job."); setHint(hintOf(err)); } };
   return <PageFrame title="Job details" context="Stored optimization record" eyebrow="History" description="Inspect the metadata and artifact availability recorded for this job." maxWidth="max-w-5xl" actions={<ButtonLink href="/app/history" variant="secondary" size="sm">Back to history</ButtonLink>}>
-    {error ? <ErrorState title="Job unavailable" message={error} hint="The record may have expired, been deleted, or belong to another session." /> : busy ? <ProgressIndicator label="Loading job details…" /> : data ? <>
+    {error ? <ErrorState title="Job unavailable" message={error} hint={hint ?? "The record may have expired, been deleted, or belong to another session."} /> : busy ? <ProgressIndicator label="Loading job details…" /> : data ? <>
       <Panel><PanelHeader title={data.job.label} description={`Created ${new Date(data.job.createdAt).toLocaleString()}`} actions={<StatusBadge tone={statusToneFor(data.job.status)}>{data.job.status}</StatusBadge>} />
         <StatStrip items={[{ label: "Files", value: formatNumber(data.job.fileCount) }, { label: "Input", value: formatBytes(data.job.inputBytes) }, { label: "Output", value: formatBytes(data.job.outputBytes) }, { label: "Bytes saved", value: formatBytes(data.job.savedBytes) }]} />
         {data.job.note ? <p className="mt-4 text-sm text-muted">{data.job.note}</p> : null}

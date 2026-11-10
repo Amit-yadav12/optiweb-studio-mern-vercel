@@ -2,10 +2,12 @@ import { useState } from "react";
 import { Globe, Info } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { ErrorState, ProgressIndicator, StatusBadge, useToast } from "@/components/ui/Feedback";
+import { StorageNotice } from "@/components/ui/StorageNotice";
 import { Field, Input } from "@/components/ui/Form";
 import { Panel, PanelHeader, StatStrip, TableShell, Td, Th } from "@/components/ui/Layout";
 import { ApiClientError, api } from "@/lib/api-client";
 import { formatBytes } from "@/lib/format";
+import type { StorageOutcome } from "@/types/domain";
 
 type AuditResponse = {
   url: string;
@@ -36,6 +38,7 @@ type AuditResponse = {
   pagespeed: { configured: boolean; lab: Record<string, { value: number | string | null; source: string; kind: string }> | null; field: Record<string, { value: number | string | null; source: string; kind: string }> | null; error?: string };
   jobId: string;
   persisted: boolean;
+  storage?: StorageOutcome;
 };
 
 export function WebsiteAudit() {
@@ -110,6 +113,10 @@ export function WebsiteAudit() {
               { label: "Duration", value: `${report.durationMs} ms` },
             ]}
           />
+
+          <StorageNotice storage={report.storage} persisted={report.persisted} title="Audited, but not stored">
+            The report below is complete. This run is not in History, so it cannot be opened again later.
+          </StorageNotice>
 
           <Panel as="aside">
             <div className="flex gap-3.5">
