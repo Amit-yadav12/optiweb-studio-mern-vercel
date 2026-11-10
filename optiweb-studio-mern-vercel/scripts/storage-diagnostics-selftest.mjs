@@ -20,8 +20,10 @@
  * stores nothing, so this test says nothing about whether persistence works.
  * That is covered by scripts/storage-mongo-selftest.mjs against real MongoDB.
  */
+import crypto from "node:crypto";
 import net from "node:net";
 import mongoose from "mongoose";
+import sharp from "sharp";
 import { UUID, createChecker, imageForm, pngImage, startApi } from "./lib/selftest-kit.mjs";
 import { serverErrors, startScriptedMongoServer } from "./lib/scripted-mongo-server.mjs";
 
@@ -39,6 +41,9 @@ process.on("unhandledRejection", (error) => { crashed(error); process.exit(1); }
 const api = await startApi();
 const { disconnectMongo } = await import("../src/server/db/mongo.ts");
 const { STORAGE_FAILURE_CATEGORIES, describeStorageFailure } = await import("../src/server/db/storageDiagnostics.ts");
+const { planInlineOutputs } = await import("../src/server/services/inlineOutput.ts");
+const { resetRateLimits } = await import("../src/server/middleware/rateLimit.ts");
+const { limits } = await import("../src/server/config/env.ts");
 
 /* ------------------------------------------------------------------ fixtures */
 
@@ -443,7 +448,48 @@ await useStandIn(undefined);
   const sentArtifacts = standIn.received("insert", "optiweb_artifacts")[0]?.command.documents ?? [];
   check("response says stored, with a job ID and no failure fields", data?.persisted === true && JSON.stringify(data?.storage) === JSON.stringify({ persisted: true }) && UUID.test(data?.jobId ?? ""));
   check("the job ID and every artifactId are the IDs that were written", data?.jobId === jobInserts()[0]?.command.documents?.[0]?._id && data?.results?.length === 2 && data.results.every((result, index) => result.artifactId === sentArtifacts[index]?._id && result.id === result.artifactId));
+  check("a stored result does not carry its file in the response", data?.results?.every((result) => result.inlineOutput === undefined && result.inlineSkipped === undefined) && !upload.visible.includes("inlineOutput"));
   check("nothing is logged for a successful write", api.takeLogs().entries.length === 0);
+}
+
+section("output files that could not be stored are sent with the response");
+// The sections above used the whole request allowance of the image endpoint.
+resetRateLimits();
+await useUri(undefined);
+{
+  /** The file a result carries, decoded, or null. */
+  const fileOf = (result) => (result?.inlineOutput?.encoding === "base64" ? Buffer.from(result.inlineOutput.data, "base64") : null);
+  const upload = await optimize([{ name: "first.png", data: image }, { name: "second.png", data: secondImage }, { name: "notes.png", data: Buffer.from("this is not an image") }]);
+  const data = upload.json?.data;
+  const [first, second, broken] = data?.results ?? [];
+  check("the upload is converted and reported as not stored", upload.status === 200 && data?.persisted === false && data?.storage?.category === "not_configured" && data?.status === "partial" && data?.jobId === "");
+  check("each converted file is in the response, with the size the result reports", [first, second].every((result) => result?.status === "completed" && result.artifactId === null && result.inlineOutput?.encoding === "base64" && result.inlineOutput.contentType === "image/webp" && result.inlineOutput.bytes === result.outputBytes && fileOf(result)?.length === result.outputBytes && result.inlineSkipped === undefined));
+  const decoded = await Promise.all([first, second].map((result) => (fileOf(result) ? sharp(fileOf(result)).metadata().catch(() => null) : null)));
+  check("the bytes are the converted image: the reported format and dimensions", decoded.every((meta, index) => meta?.format === "webp" && meta.width === [first, second][index]?.outputWidth && meta.height === [first, second][index]?.outputHeight), JSON.stringify(decoded.map((meta) => meta && [meta.format, meta.width, meta.height])));
+  check("the two files are different files, in upload order", fileOf(first)?.equals(fileOf(second) ?? Buffer.alloc(0)) === false && first?.filename === "first.png" && second?.filename === "second.png" && decoded[0]?.width === 48 && decoded[1]?.width === 40);
+  check("a rejected file carries nothing", broken?.status === "failed" && broken.inlineOutput === undefined && broken.inlineSkipped === undefined);
+  check("the response is not cacheable", (upload.headers.get("cache-control") ?? "").includes("no-store"));
+  checkNothingLeaked("the response with the files", [upload], api.takeLogs().text);
+
+  // Outputs larger than one response may carry: four incompressible PNG files of about 0.84 MB each.
+  const noise = () => sharp(crypto.randomBytes(540 * 540 * 3), { raw: { width: 540, height: 540, channels: 3 } }).png({ compressionLevel: 0 }).toBuffer();
+  const large = await Promise.all([0, 1, 2, 3].map(async (index) => ({ name: `noise-${index}.png`, data: await noise() })));
+  const batch = await api.call("/api/v1/images/optimize", { method: "POST", body: imageForm(large, { format: "png" }) });
+  const results = batch.json?.data?.results ?? [];
+  const sent = results.filter((result) => result.inlineOutput);
+  const skipped = results.filter((result) => result.inlineSkipped === "too_large");
+  const sentBytes = sent.reduce((sum, result) => sum + result.inlineOutput.bytes, 0);
+  const totalBytes = results.reduce((sum, result) => sum + result.outputBytes, 0);
+  check("a batch whose outputs exceed the limit is still converted in full", batch.status === 200 && results.length === 4 && results.every((result) => result.status === "completed") && totalBytes > limits.maxInlineBytes, `${totalBytes} bytes of output, limit ${limits.maxInlineBytes}`);
+  check("files are sent in order until the limit is reached; the rest are marked too large", sent.length === 3 && skipped.length === 1 && results[3].inlineSkipped === "too_large" && results[3].inlineOutput === null && sentBytes <= limits.maxInlineBytes, `${sent.length} sent (${sentBytes} bytes), ${skipped.length} skipped`);
+  check("every file that was sent is complete", sent.every((result) => fileOf(result)?.length === result.outputBytes));
+  check("the response stays below the 4.5 MB serverless response limit", batch.bytes.length < 4_500_000, `${batch.bytes.length} bytes`);
+  api.takeLogs();
+
+  check("limit: files are accepted in order while they fit", JSON.stringify(planInlineOutputs([1, 2, 3], 3)) === "[true,true,false]" && JSON.stringify(planInlineOutputs([3], 3)) === "[true]");
+  check("limit: a file that does not fit is skipped and a later, smaller one is still sent", JSON.stringify(planInlineOutputs([5, 1, 2, 1], 3)) === "[false,true,true,false]");
+  check("limit: a file without output is never sent", JSON.stringify(planInlineOutputs([0, 2], 3)) === "[false,true]");
+  check("limit: the default is 3 MB and the environment cannot raise it", limits.maxInlineBytes === 3 * 1024 * 1024);
 }
 
 section("recovery: a failed connection is not remembered");

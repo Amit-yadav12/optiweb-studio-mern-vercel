@@ -95,6 +95,7 @@ let storedJobId = null;
   check("both files are converted", upload.status === 200 && data?.status === "completed" && data?.results?.length === 2 && data.results.every((result) => result.status === "completed"), `status ${upload.status}`);
   check("response says stored, with a job ID", data?.persisted === true && JSON.stringify(data?.storage) === JSON.stringify({ persisted: true }) && UUID.test(storedJobId ?? ""));
   check("every result has an artifactId", data?.results?.every((result) => UUID.test(result.artifactId ?? "") && result.id === result.artifactId));
+  check("a stored result does not carry its file in the response", data?.results?.every((result) => result.inlineOutput === undefined && result.inlineSkipped === undefined) === true);
 
   const job = await jobs.findOne({ _id: storedJobId });
   check("the job record is in the database, under this session", job?.sessionId === sessionId && job?.kind === "image.optimize" && job?.items?.length === 2, job ? "found" : "missing");
@@ -155,6 +156,9 @@ section("the database rejects the job record → write_failed, nothing stored");
   check("the image is still converted", upload.status === 200 && data?.status === "completed" && data?.results?.[0]?.outputBytes > 0, `status ${upload.status}`);
   check("response says not stored, with write_failed", data?.persisted === false && describes(data?.storage, "write_failed"), String(data?.storage?.category));
   check("response names no job and no downloadable file", data?.jobId === "" && data?.results?.every((result) => result.artifactId === null));
+  const sentBack = data?.results?.[0]?.inlineOutput?.encoding === "base64" ? Buffer.from(data.results[0].inlineOutput.data, "base64") : null;
+  const sentBackFormat = sentBack ? await sharp(sentBack).metadata().then((meta) => meta.format, () => null) : null;
+  check("the converted file comes back in the response instead, intact", sentBack !== null && sentBack.length === data?.results?.[0]?.outputBytes && sentBackFormat === data?.results?.[0]?.outputFormat, `${sentBack?.length} bytes, ${sentBackFormat}`);
   check("log line: write_failed at stage write, document validation, rollback completed", entry?.category === "write_failed" && entry?.stage === "write" && entry?.detail === "document_validation_failed" && entry?.rollback === "completed" && entry?.requestId === upload.json?.meta?.requestId, JSON.stringify(entry ?? null).slice(0, 300));
   check("the database holds no new job and no new file", sameCounts(before, await counts()) && (await artifacts.countDocuments({ itemFilename: "rejected-job.jpg" })) === 0);
   check("the response and log do not contain the server's error text", !upload.visible.includes("Document failed validation") && !logs.text.includes("Document failed validation"));
@@ -183,6 +187,8 @@ section("the database rejects the second output file → artifact_insert_failed,
   check("both images are still converted", upload.status === 200 && data?.status === "completed" && data?.results?.length === 2, `status ${upload.status}`);
   check("response says not stored, with artifact_insert_failed", data?.persisted === false && describes(data?.storage, "artifact_insert_failed"), String(data?.storage?.category));
   check("response names no job and no downloadable file", data?.jobId === "" && data?.results?.every((result) => result.artifactId === null));
+  const returned = (data?.results ?? []).map((result) => (result.inlineOutput?.encoding === "base64" ? Buffer.from(result.inlineOutput.data, "base64") : null));
+  check("both converted files come back in the response after the rollback", returned.length === 2 && returned.every((file, index) => file !== null && file.length === data.results[index].outputBytes), returned.map((file) => file?.length).join(", "));
   check("log line: artifact_insert_failed at stage artifact_insert, rollback completed", entry?.category === "artifact_insert_failed" && entry?.stage === "artifact_insert" && entry?.rollback === "completed" && entry?.requestId === upload.json?.meta?.requestId, JSON.stringify(entry ?? null).slice(0, 300));
   check("no rollback failure is logged", !logs.entries.some((candidate) => candidate.event === "storage_rollback_failed"));
   check("the job record is gone", (await jobs.countDocuments({ "items.filename": "rollback-first.jpg" })) === 0);

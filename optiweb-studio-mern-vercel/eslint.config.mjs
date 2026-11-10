@@ -11,6 +11,7 @@ export default tseslint.config(
     files: ["scripts/**/*.mjs"],
     languageOptions: {
       globals: {
+        AbortSignal: "readonly",
         Blob: "readonly",
         Buffer: "readonly",
         File: "readonly",

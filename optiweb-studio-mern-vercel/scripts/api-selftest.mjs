@@ -144,6 +144,7 @@ check(
   JSON.stringify(optimize.body?.data?.storage),
 );
 check("stored result carries its artifactId", typeof result?.artifactId === "string" && result.artifactId === result.id);
+check("stored result does not carry its file in the response", result?.inlineOutput === undefined && result?.inlineSkipped === undefined);
 
 /* artifact download */
 const artifactId = result?.artifactId;
