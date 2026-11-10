@@ -4,8 +4,8 @@
  */
 import mongoose, { Schema, type FilterQuery, type Model } from "mongoose";
 import { randomUUID } from "node:crypto";
-import { connectMongo } from "@/server/db/mongo";
-import { limits } from "@/server/config/env";
+import { connectMongo } from "../db/mongo.js";
+import { limits } from "../config/env.js";
 import type {
   HistoryEntry,
   HistoryPage,
@@ -13,7 +13,7 @@ import type {
   JobKind,
   JobStatus,
   Preferences,
-} from "@/types/domain";
+} from "../../types/domain.js";
 
 export type PersistItem = {
   filename: string;

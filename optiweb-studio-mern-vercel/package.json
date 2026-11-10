@@ -5,7 +5,7 @@
   "type": "module",
   "description": "OptiWeb Studio — a MERN developer workspace for static asset optimization and CSS font analysis.",
   "engines": {
-    "node": ">=20.19.0"
+    "node": "22.x"
   },
   "scripts": {
     "dev": "concurrently -k -n API,WEB -c blue,green \"npm:dev:server\" \"npm:dev:client\"",

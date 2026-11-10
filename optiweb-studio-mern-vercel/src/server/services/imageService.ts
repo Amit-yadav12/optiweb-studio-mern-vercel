@@ -1,14 +1,14 @@
 import sharp from "sharp";
 import path from "node:path";
-import { limits, imageFormats, type ImageFormat } from "@/server/config/env";
+import { limits, imageFormats, type ImageFormat } from "../config/env.js";
 import {
   badRequest,
   payloadTooLarge,
   unprocessable,
   unsupportedMedia,
-} from "@/server/http/errors";
-import type { CandidateRecord, ImageMetrics, ImageOptimizeSettings } from "@/types/domain";
-import type { OptimizationPolicy } from "@/server/config/env";
+} from "../http/errors.js";
+import type { CandidateRecord, ImageMetrics, ImageOptimizeSettings } from "../../types/domain.js";
+import type { OptimizationPolicy } from "../config/env.js";
 
 sharp.cache(false);
 sharp.concurrency(1);

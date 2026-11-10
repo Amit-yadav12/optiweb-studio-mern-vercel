@@ -11,11 +11,11 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import * as http from "node:http";
 import * as https from "node:https";
-import { limits } from "@/server/config/env";
-import { badRequest, unprocessable } from "@/server/http/errors";
-import { assertPublicHostname, assertPublicIp, parseHttpUrl, validateAuditUrl } from "@/server/security/ssrf";
-import { sniffImage } from "@/server/services/imageService";
-import { analyzeCss } from "@/server/services/cssService";
+import { limits } from "../config/env.js";
+import { badRequest, unprocessable } from "../http/errors.js";
+import { assertPublicHostname, assertPublicIp, parseHttpUrl, validateAuditUrl } from "../security/ssrf.js";
+import { sniffImage } from "./imageService.js";
+import { analyzeCss } from "./cssService.js";
 
 export type EvidenceKind = "measured" | "estimated" | "unavailable" | "not-applicable";
 

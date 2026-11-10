@@ -1,8 +1,8 @@
-import { jsonOk, parseJson, route } from "@/server/http/handler";
-import { getPreferences, savePreferences } from "@/server/services/storageService";
-import { preferencesSchema } from "@/server/validators";
-import { limits } from "@/server/config/env";
-import type { Preferences } from "@/types/domain";
+import { jsonOk, parseJson, route } from "../../http/handler.js";
+import { getPreferences, savePreferences } from "../../services/storageService.js";
+import { preferencesSchema } from "../../validators/index.js";
+import { limits } from "../../config/env.js";
+import type { Preferences } from "../../../types/domain.js";
 
 
 const FALLBACK: Preferences = {

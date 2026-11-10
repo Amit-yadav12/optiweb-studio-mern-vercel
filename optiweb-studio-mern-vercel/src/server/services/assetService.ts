@@ -5,9 +5,9 @@
  * from a heuristic (a threshold) or a hard fact (parsed metadata). The analyzer
  * never infers page usage: it only sees the file you give it.
  */
-import { sniffImage } from "@/server/services/imageService";
-import { countFontDisplayGaps } from "@/server/services/cssService";
-import type { AssetAnalysisFile, AssetFinding, AssetAnalysisResponse } from "@/types/domain";
+import { sniffImage } from "./imageService.js";
+import { countFontDisplayGaps } from "./cssService.js";
+import type { AssetAnalysisFile, AssetFinding, AssetAnalysisResponse } from "../../types/domain.js";
 
 const FORMAT_ADVICE: Record<string, { severity: AssetFinding["severity"]; title: string; detail: string }> = {
   jpeg: {

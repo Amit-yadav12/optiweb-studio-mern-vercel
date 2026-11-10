@@ -7,7 +7,7 @@
  */
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { badRequest } from "@/server/http/errors";
+import { badRequest } from "../http/errors.js";
 
 const BLOCKED_HOSTS = new Set(["localhost", "localhost.localdomain", "metadata.google.internal"]);
 

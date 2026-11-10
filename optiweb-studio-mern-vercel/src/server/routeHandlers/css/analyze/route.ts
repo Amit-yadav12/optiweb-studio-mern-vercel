@@ -1,6 +1,6 @@
-import { jsonOk, parseJson, route } from "@/server/http/handler";
-import { analyzeCss, POLICY_NOTES } from "@/server/services/cssService";
-import { cssAnalyzeSchema } from "@/server/validators";
+import { jsonOk, parseJson, route } from "../../../http/handler.js";
+import { analyzeCss, POLICY_NOTES } from "../../../services/cssService.js";
+import { cssAnalyzeSchema } from "../../../validators/index.js";
 
 
 /** POST /api/v1/css/analyze — read-only diagnosis, never mutates the input. */

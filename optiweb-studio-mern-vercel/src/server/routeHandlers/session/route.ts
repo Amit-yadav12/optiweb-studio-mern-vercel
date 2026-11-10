@@ -1,4 +1,4 @@
-import { jsonOk, route } from "@/server/http/handler";
+import { jsonOk, route } from "../../http/handler.js";
 
 
 /**

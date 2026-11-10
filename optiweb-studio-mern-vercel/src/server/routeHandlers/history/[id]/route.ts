@@ -1,6 +1,6 @@
-import { jsonOk, routeWithParams } from "@/server/http/handler";
-import { notFound } from "@/server/http/errors";
-import { deleteJob, getJobDetail } from "@/server/services/storageService";
+import { jsonOk, routeWithParams } from "../../../http/handler.js";
+import { notFound } from "../../../http/errors.js";
+import { deleteJob, getJobDetail } from "../../../services/storageService.js";
 
 
 /** GET /api/v1/history/:id — job header plus per-file rows (metadata only). */
