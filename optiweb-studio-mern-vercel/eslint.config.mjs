@@ -13,6 +13,7 @@ export default tseslint.config(
       globals: {
         Blob: "readonly",
         Buffer: "readonly",
+        File: "readonly",
         FormData: "readonly",
         Request: "readonly",
         URL: "readonly",

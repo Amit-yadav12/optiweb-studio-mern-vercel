@@ -1,8 +1,12 @@
 name: CI
 
-# Builds the app and runs every automated check, including the API workflow
-# against a real, throwaway MongoDB server. The database lives only for the
-# duration of the job, so destructive tests never touch Atlas or production data.
+# Builds the app and runs every automated check, including the persistence and
+# API workflows against a real, throwaway MongoDB server. The database lives
+# only for the duration of the job, so destructive tests never touch Atlas or
+# production data.
+#
+# Once the build succeeds, every test step runs even if an earlier one failed,
+# so a single run reports all failures.
 
 on:
   push:
@@ -55,15 +59,34 @@ jobs:
         run: npm run lint
 
       - name: Build
+        id: build
         run: npm run build
 
       - name: Static accessibility checks
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run test:a11y
 
       - name: Netlify function adapter checks (no database)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run test:function
 
+      - name: Image outcome checks for the results panel (no database)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:ui
+
+      - name: Storage diagnostics for every failure category (no database)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:storage
+
+      - name: Persistence, rollback and credential checks against an isolated MongoDB
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_storage_${{ github.run_id }}_${{ github.run_attempt }}
+          NODE_ENV: test
+        run: npm run test:storage:mongo
+
       - name: API and persistence workflow against an isolated MongoDB
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_${{ github.run_id }}_${{ github.run_attempt }}
           NODE_ENV: test

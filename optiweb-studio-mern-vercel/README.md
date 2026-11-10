@@ -45,7 +45,7 @@ Configure Atlas with a restricted database user and an IP/network policy that ma
 
 Collections are `optiweb_jobs`, `optiweb_artifacts`, and `optiweb_preferences`. Artifact documents use a TTL index. Guest data is scoped to an opaque HTTP-only `ow_sid` cookie; this is session history, not an account system. Image artifacts are deliberately bounded for Function and MongoDB document limits. Larger files need a separately designed object-storage/worker path.
 
-Health: `/api/v1/health` returns MongoDB connection state and measured probe latency without revealing the URI. A `200` response alone does not mean persistence is ready; check `data.database.connected`.
+Health: `/api/v1/health` reports whether MongoDB is ready for reads and writes, with the measured latency of the check, without revealing the URI. It always answers `200`, so check `data.database.ready`. When it is false, `data.database.category` names the cause, for example `not_configured`, `authentication_failed` or `network_access_denied`. The full list and the log format are in `docs/deployment.md` under "Storage diagnostics".
 
 ## Netlify deployment
 
@@ -69,9 +69,13 @@ npm run typecheck
 npm run lint
 npm run test:a11y
 npm run test:function
+npm run test:ui
+npm run test:storage
 ```
 
 `test:function` exercises the real `serverless-http` handler with synthetic Netlify-style events, including the API path, cookies, JSON, Base64 multipart uploads, Sharp conversion, and safe errors. It intentionally refuses to run when `MONGODB_URI` or `MONGO_URL` is present and explicitly verifies the no-database state; it does **not** test Atlas persistence.
+
+`test:storage` makes MongoDB fail in each diagnosed way without needing a database, and `test:ui` renders the image results panel for each outcome. Neither tests real persistence; `npm run test:storage:mongo` does, against a disposable database (CI runs it against a `mongo:7` container).
 
 `npm test` and `npm run test:security` target a running API and require a separate isolated test database because they create/delete test records. Never point those scripts at production. Browser-based visual/axe testing and live Netlify deployment checks must still be performed in an environment with a browser, Netlify account, and configured test database.
 

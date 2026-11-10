@@ -19,6 +19,9 @@
     "test": "node scripts/api-selftest.mjs",
     "test:security": "node scripts/security-probe.mjs",
     "test:function": "node --import tsx scripts/netlify-function-selftest.mjs",
+    "test:storage": "node --import tsx scripts/storage-diagnostics-selftest.mjs",
+    "test:storage:mongo": "node --import tsx scripts/storage-mongo-selftest.mjs",
+    "test:ui": "node --import tsx scripts/ui-outcome-selftest.mjs",
     "test:a11y": "node scripts/a11y-audit.mjs"
   },
   "dependencies": {
