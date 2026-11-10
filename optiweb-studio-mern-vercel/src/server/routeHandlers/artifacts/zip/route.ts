@@ -1,8 +1,8 @@
-import { badRequest, payloadTooLarge } from "@/server/http/errors";
-import { binaryOk, parseJson, route } from "@/server/http/handler";
-import { getArtifactsByIds } from "@/server/services/storageService";
-import { artifactZipSchema } from "@/server/validators";
-import { limits } from "@/server/config/env";
+import { badRequest, payloadTooLarge } from "../../../http/errors.js";
+import { binaryOk, parseJson, route } from "../../../http/handler.js";
+import { getArtifactsByIds } from "../../../services/storageService.js";
+import { artifactZipSchema } from "../../../validators/index.js";
+import { limits } from "../../../config/env.js";
 import JSZip from "jszip";
 
 

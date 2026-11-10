@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { APP_NAME } from "@/server/config/env";
+import { APP_NAME } from "./server/config/env.js";
 import app from "./app.js";
 
 // This is the local/standalone Express entry point. Serverless adapters import

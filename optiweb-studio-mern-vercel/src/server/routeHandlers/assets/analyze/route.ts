@@ -1,8 +1,8 @@
-import { jsonOk, route } from "@/server/http/handler";
-import { readMultipart } from "@/server/http/multipart";
-import { analyzeAssets } from "@/server/services/assetService";
-import { persistJob } from "@/server/services/storageService";
-import { badRequest } from "@/server/http/errors";
+import { jsonOk, route } from "../../../http/handler.js";
+import { readMultipart } from "../../../http/multipart.js";
+import { analyzeAssets } from "../../../services/assetService.js";
+import { persistJob } from "../../../services/storageService.js";
+import { badRequest } from "../../../http/errors.js";
 
 
 /** POST /api/v1/assets/analyze — diagnostics for the exact files you upload. */

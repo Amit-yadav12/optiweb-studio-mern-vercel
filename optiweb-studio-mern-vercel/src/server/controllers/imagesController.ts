@@ -1,16 +1,16 @@
 /** Image optimization controller: validate → transform → measure → persist. */
-import { limits } from "@/server/config/env";
-import { jsonOk, type RouteContext } from "@/server/http/handler";
-import { readMultipart } from "@/server/http/multipart";
-import { ApiError, payloadTooLarge } from "@/server/http/errors";
-import { imageSettingsSchema } from "@/server/validators";
+import { limits } from "../config/env.js";
+import { jsonOk, type RouteContext } from "../http/handler.js";
+import { readMultipart } from "../http/multipart.js";
+import { ApiError, payloadTooLarge } from "../http/errors.js";
+import { imageSettingsSchema } from "../validators/index.js";
 import {
   mapWithConcurrency,
   optimizeWithPolicy,
   sanitizeFilename,
-} from "@/server/services/imageService";
-import { persistJob } from "@/server/services/storageService";
-import type { ImageOptimizeResponse, ImageResult } from "@/types/domain";
+} from "../services/imageService.js";
+import { persistJob } from "../services/storageService.js";
+import type { ImageOptimizeResponse, ImageResult } from "../../types/domain.js";
 
 type Processed = { result: ImageResult; output: Buffer | null };
 

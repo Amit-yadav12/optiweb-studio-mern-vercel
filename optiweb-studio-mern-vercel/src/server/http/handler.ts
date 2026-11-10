@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { ZodError, type ZodType } from "zod";
-import { ApiError, type ApiErrorCode, validationError } from "@/server/http/errors";
-import { consumeRateLimit, type RateLimitResult } from "@/server/middleware/rateLimit";
-import type { RateLimitBucket } from "@/server/config/env";
+import { ApiError, type ApiErrorCode, validationError } from "./errors.js";
+import { consumeRateLimit, type RateLimitResult } from "../middleware/rateLimit.js";
+import type { RateLimitBucket } from "../config/env.js";
 
 export const SESSION_COOKIE = "ow_sid";
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30 days

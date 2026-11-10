@@ -1,7 +1,7 @@
-import { jsonOk, parseJson, route } from "@/server/http/handler";
-import { auditRequestSchema } from "@/server/validators";
-import { runWebsiteAudit } from "@/server/services/auditService";
-import { persistJob } from "@/server/services/storageService";
+import { jsonOk, parseJson, route } from "../../http/handler.js";
+import { auditRequestSchema } from "../../validators/index.js";
+import { runWebsiteAudit } from "../../services/auditService.js";
+import { persistJob } from "../../services/storageService.js";
 
 
 /** POST /api/v1/audits — SSRF-safe document fetch + asset discovery. */

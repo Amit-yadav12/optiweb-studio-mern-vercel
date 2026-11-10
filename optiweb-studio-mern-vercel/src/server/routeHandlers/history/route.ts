@@ -1,6 +1,6 @@
-import { jsonOk, route, searchParams } from "@/server/http/handler";
-import { clearSessionHistory, listHistory, sessionSummary } from "@/server/services/storageService";
-import { historyQuerySchema } from "@/server/validators";
+import { jsonOk, route, searchParams } from "../../http/handler.js";
+import { clearSessionHistory, listHistory, sessionSummary } from "../../services/storageService.js";
+import { historyQuerySchema } from "../../validators/index.js";
 
 
 /** GET /api/v1/history — session-scoped, filterable, paginated. */

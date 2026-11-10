@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { storageUnavailable } from "@/server/http/errors";
+import { storageUnavailable } from "../http/errors.js";
 
 type Cache = { connection: typeof mongoose | null; promise: Promise<typeof mongoose> | null };
 const globalCache = globalThis as typeof globalThis & { __optiwebMongo?: Cache };

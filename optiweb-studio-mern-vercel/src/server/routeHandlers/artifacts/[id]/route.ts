@@ -1,6 +1,6 @@
-import { binaryOk, routeWithParams } from "@/server/http/handler";
-import { notFound } from "@/server/http/errors";
-import { getArtifact, isUuid } from "@/server/services/storageService";
+import { binaryOk, routeWithParams } from "../../../http/handler.js";
+import { notFound } from "../../../http/errors.js";
+import { getArtifact, isUuid } from "../../../services/storageService.js";
 
 
 /**

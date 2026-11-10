@@ -1,6 +1,6 @@
 /** Multipart upload handling: bounded, allowlisted, and mime-agnostic. */
-import { limits } from "@/server/config/env";
-import { badRequest, payloadTooLarge, tooManyFiles } from "@/server/http/errors";
+import { limits } from "../config/env.js";
+import { badRequest, payloadTooLarge, tooManyFiles } from "./errors.js";
 
 export type UploadFile = {
   field: string;

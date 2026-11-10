@@ -18,6 +18,22 @@ let cookie = "";
 let passed = 0;
 const failures = [];
 
+/**
+ * In GitHub Actions, surface results as workflow annotations as well. They are
+ * readable from the Checks API, so a failure can be diagnosed without the logs.
+ */
+function annotate(level, message) {
+  if (process.env.GITHUB_ACTIONS !== "true") return;
+  const escaped = String(message).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+  console.log(`::${level} title=api-selftest::${escaped}`);
+}
+
+process.on("uncaughtException", (error) => {
+  console.error(error);
+  annotate("error", `self-test crashed after ${passed} passing checks: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+});
+
 function check(name, condition, detail = "") {
   if (condition) {
     passed += 1;
@@ -25,6 +41,7 @@ function check(name, condition, detail = "") {
   } else {
     failures.push(`${name}${detail ? ` — ${detail}` : ""}`);
     console.log(`  ✗ ${name}${detail ? ` — ${detail}` : ""}`);
+    annotate("error", `${name}${detail ? ` — ${String(detail).slice(0, 400)}` : ""}`);
   }
 }
 
@@ -482,6 +499,7 @@ check("unknown client-side route serves SPA shell for the React 404 page", missi
 
 /* ---------------------------------------------------------------- summary */
 console.log(`\n${passed} passed, ${failures.length} failed`);
+annotate(failures.length > 0 ? "error" : "notice", `${passed} passed, ${failures.length} failed against ${new URL(BASE).host}`);
 if (failures.length > 0) {
   console.log("\nFailures:");
   for (const failure of failures) console.log(` - ${failure}`);

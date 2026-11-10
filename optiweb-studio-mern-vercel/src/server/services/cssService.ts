@@ -9,9 +9,9 @@
  * - Everything the tool does not understand is left byte-for-byte untouched.
  */
 import postcss, { type AtRule } from "postcss";
-import { limits, type FontDisplayPolicy } from "@/server/config/env";
-import { badRequest, unprocessable } from "@/server/http/errors";
-import type { CssAnalysis, CssFinding, CssPatchResponse } from "@/types/domain";
+import { limits, type FontDisplayPolicy } from "../config/env.js";
+import { badRequest, unprocessable } from "../http/errors.js";
+import type { CssAnalysis, CssFinding, CssPatchResponse } from "../../types/domain.js";
 
 export type PolicyNote = { label: string; behaviour: string; tradeOff: string };
 

@@ -1,5 +1,5 @@
 /** Shared client/server domain types for OptiWeb Studio. */
-import type { FontDisplayPolicy, ImageFormat, OptimizationPolicy } from "@/server/config/env";
+import type { FontDisplayPolicy, ImageFormat, OptimizationPolicy } from "../server/config/env.js";
 export type { FontDisplayPolicy, ImageFormat, OptimizationPolicy };
 
 export type JobKind = "image.optimize" | "css.font-display" | "asset.analyze" | "site.audit";

@@ -1,6 +1,6 @@
-import { jsonOk, route } from "@/server/http/handler";
-import { limits, imageFormats, fontDisplayValues } from "@/server/config/env";
-import { supportsAvif } from "@/server/services/imageService";
+import { jsonOk, route } from "../../http/handler.js";
+import { limits, imageFormats, fontDisplayValues } from "../../config/env.js";
+import { supportsAvif } from "../../services/imageService.js";
 
 /**
  * GET /api/v1/limits — the numbers the UI copy must match.

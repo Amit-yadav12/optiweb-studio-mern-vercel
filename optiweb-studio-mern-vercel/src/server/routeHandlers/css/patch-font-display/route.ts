@@ -1,7 +1,7 @@
-import { jsonOk, parseJson, route } from "@/server/http/handler";
-import { patchFontDisplay } from "@/server/services/cssService";
-import { persistJob } from "@/server/services/storageService";
-import { cssPatchSchema } from "@/server/validators";
+import { jsonOk, parseJson, route } from "../../../http/handler.js";
+import { patchFontDisplay } from "../../../services/cssService.js";
+import { persistJob } from "../../../services/storageService.js";
+import { cssPatchSchema } from "../../../validators/index.js";
 
 
 /** POST /api/v1/css/patch-font-display — parses, patches, reports exact deltas. */

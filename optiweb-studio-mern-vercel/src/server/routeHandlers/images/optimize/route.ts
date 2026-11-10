@@ -1,5 +1,5 @@
-import { optimizeUploadedImages } from "@/server/controllers/imagesController";
-import { route } from "@/server/http/handler";
+import { optimizeUploadedImages } from "../../../controllers/imagesController.js";
+import { route } from "../../../http/handler.js";
 
 
 /** POST /api/v1/images/optimize — accepts one image or a multipart batch. */

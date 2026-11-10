@@ -4,7 +4,7 @@ import {
   fontDisplayValues,
   imageFormats,
   limits,
-} from "@/server/config/env";
+} from "../config/env.js";
 
 const qualitySchema = z
   .number()

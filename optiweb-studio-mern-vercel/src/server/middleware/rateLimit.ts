@@ -5,7 +5,7 @@
  * Node instance. On horizontally scaled deployments the limiter must move to a
  * shared store (Redis) — documented in docs/deployment.md.
  */
-import { rateLimits, type RateLimitBucket } from "@/server/config/env";
+import { rateLimits, type RateLimitBucket } from "../config/env.js";
 
 type Hit = { count: number; resetAt: number };
 
