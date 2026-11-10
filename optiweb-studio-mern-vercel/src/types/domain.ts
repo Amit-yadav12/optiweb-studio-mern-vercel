@@ -44,8 +44,9 @@ export type StorageFailure = { category: StorageFailureCategory; message: string
  * Whether the result of a request was stored.
  *
  * `persisted: true` means the job is in History and its output files can be
- * downloaded. When it is false, nothing was kept: there is no history entry
- * and no download, and the remaining fields say why.
+ * downloaded by URL. When it is false, nothing was kept: there is no history
+ * entry and no stored download, and the remaining fields say why. The image
+ * optimizer then sends the converted files in the response (`inlineOutput`).
  */
 export type StorageOutcome = { persisted: true } | ({ persisted: false } & StorageFailure);
 
@@ -78,11 +79,36 @@ export type ImageMetrics = {
   outputFormat: string;
 };
 
+/**
+ * An output file sent inside the response, because it could not be stored.
+ *
+ * The browser can save it from the page that received the response. It is not
+ * a stored download: the server keeps no copy, no URL serves it, and it is not
+ * in History.
+ */
+export type InlineOutput = {
+  encoding: "base64";
+  /** MIME type of the produced bytes. */
+  contentType: string;
+  /** Size of the decoded file. Equals the result's `outputBytes`. */
+  bytes: number;
+  /** The file, Base64-encoded with padding. */
+  data: string;
+};
+
 export type ImageResult = ImageMetrics & {
   /** Identifies the result within this response. It is not a download ID; see `artifactId`. */
   id: string;
-  /** ID of the stored output file, or null when there is nothing to download (not converted, or not stored). */
+  /** ID of the stored output file, or null when the file was not converted or not stored. */
   artifactId: string | null;
+  /**
+   * The output file itself, sent only when it was converted but not stored.
+   * Absent or null when the file is stored (use `artifactId`), was not
+   * converted, or did not fit in the response (`inlineSkipped`).
+   */
+  inlineOutput?: InlineOutput | null;
+  /** Set when an unstored output file is not in the response: the outputs of the batch exceed the response size limit. */
+  inlineSkipped?: "too_large";
   /** Name of the uploaded source file (sanitised). */
   filename: string;
   /** Name of the produced file, e.g. "hero-optiweb.webp". */
@@ -103,7 +129,7 @@ export type ImageResult = ImageMetrics & {
 export type ImageOptimizeResponse = {
   /** History ID of the stored job. Empty when `persisted` is false. */
   jobId: string;
-  /** Same value as `storage.persisted`. False means no history entry and no downloads exist. */
+  /** Same value as `storage.persisted`. False means no history entry and no stored downloads exist. */
   persisted: boolean;
   /** Storage result, with the failure category and safe wording when nothing was stored. */
   storage: StorageOutcome;
