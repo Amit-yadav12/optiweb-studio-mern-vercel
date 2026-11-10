@@ -4,6 +4,7 @@ import { Notice, StatusBadge } from "@/components/ui/Feedback";
 import { DefinitionRow, Panel, PanelHeader, StatStrip, TableShell, Td, Th } from "@/components/ui/Layout";
 import { SavingsChart } from "@/components/charts/SavingsChart";
 import { CompareSlider } from "@/features/images/CompareSlider";
+import type { LocalOutput } from "@/features/images/localOutput";
 import { describeImageOutcome, type ImageOutcome } from "@/features/images/outcome";
 import { artifactUrl } from "@/lib/api-client";
 import { formatBytes, formatDimensions, formatDuration, formatSavingsPercent } from "@/lib/format";
@@ -20,6 +21,11 @@ export type OptimizerItem = {
   result?: ImageResult;
   /** ID of the stored output file. Set by `settleResult`; null or absent when the output was not stored. */
   artifactId?: string | null;
+  /**
+   * The converted file held in this tab, for a result that was not stored but
+   * whose bytes came with the response. Never set together with `artifactId`.
+   */
+  localOutput?: LocalOutput | null;
   error?: string;
 };
 
@@ -57,14 +63,16 @@ export function ImageOutcomeNotice({ outcome }: { outcome: ImageOutcome }) {
 
 /**
  * Results of the optimization queue. The banner, badges and totals describe
- * the latest run (`response`). Each file's download exists only if that file's
- * output was stored (`item.artifactId`).
+ * the latest run (`response`). A file has a download in two cases: its output
+ * was stored (`item.artifactId`, served by URL), or it was not stored but its
+ * bytes came with the response and are held in this tab (`item.localOutput`).
  */
 export function ImageReview({
   response,
   items,
   zipping,
   onDownloadAll,
+  onDownloadLocal,
   onReset,
 }: {
   response: ImageOptimizeResponse;
@@ -72,13 +80,19 @@ export function ImageReview({
   zipping: boolean;
   /** Receives the IDs of the stored output files. */
   onDownloadAll: (artifactIds: string[]) => void;
+  /** Receives the unstored files held in this tab. */
+  onDownloadLocal: (outputs: LocalOutput[]) => void;
   onReset: () => void;
 }) {
   const outcome = describeImageOutcome(response);
   const completed = items.filter((item) => item.status === "completed" && item.result);
   const failed = items.filter((item) => item.status === "failed");
   const artifactIdOf = (item: OptimizerItem): string | null => item.artifactId ?? null;
+  const localOutputOf = (item: OptimizerItem): LocalOutput | null => (artifactIdOf(item) === null ? item.localOutput ?? null : null);
   const storedIds = completed.map(artifactIdOf).filter((id): id is string => id !== null);
+  const localOutputs = completed.map(localOutputOf).filter((output): output is LocalOutput => output !== null);
+  // A queue can hold stored files from one run and unstored files from another.
+  const bothKinds = storedIds.length > 1 && localOutputs.length > 1;
 
   return (
     <section aria-labelledby="review-panel" className="animate-fade-up flex flex-col gap-6">
@@ -97,7 +111,12 @@ export function ImageReview({
             <div className="flex flex-wrap items-center gap-2">
               {storedIds.length > 1 ? (
                 <Button variant="secondary" size="sm" onClick={() => onDownloadAll(storedIds)} loading={zipping} leading={<Package className="size-3.5" aria-hidden />}>
-                  Download all (ZIP)
+                  {bothKinds ? "Download stored files (ZIP)" : "Download all (ZIP)"}
+                </Button>
+              ) : null}
+              {localOutputs.length > 1 ? (
+                <Button variant="secondary" size="sm" onClick={() => onDownloadLocal(localOutputs)} loading={zipping} leading={<Package className="size-3.5" aria-hidden />}>
+                  {bothKinds ? "Download unstored files (ZIP)" : "Download all (ZIP)"}
                 </Button>
               ) : null}
               <Button variant="ghost" size="sm" onClick={onReset} leading={<RotateCcw className="size-3.5" aria-hidden />}>
@@ -176,6 +195,7 @@ export function ImageReview({
               <tbody>
                 {completed.map((item) => {
                   const artifactId = artifactIdOf(item);
+                  const local = localOutputOf(item);
                   return (
                     <tr key={item.key}>
                       <Td mono>
@@ -204,6 +224,15 @@ export function ImageReview({
                             <Download className="size-3.5" aria-hidden />
                             Save
                           </a>
+                        ) : local ? (
+                          <a
+                            className="inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:text-accent-hover hover:underline"
+                            href={local.url}
+                            download={local.filename}
+                          >
+                            <Download className="size-3.5" aria-hidden />
+                            Save
+                          </a>
                         ) : (
                           <span className="text-xs text-muted">Not stored</span>
                         )}
@@ -217,7 +246,7 @@ export function ImageReview({
 
           <div className="grid gap-4 xl:grid-cols-2">
             {completed.map((item) => (
-              <ResultCard key={item.key} item={item} artifactId={artifactIdOf(item)} />
+              <ResultCard key={item.key} item={item} artifactId={artifactIdOf(item)} local={localOutputOf(item)} />
             ))}
           </div>
         </>
@@ -226,9 +255,14 @@ export function ImageReview({
   );
 }
 
-/** `artifactId` is the stored output file, or null when this result was not stored. */
-function ResultCard({ item, artifactId }: { item: OptimizerItem; artifactId: string | null }) {
+/**
+ * `artifactId` is the stored output file, or null when this result was not
+ * stored. `local` is the copy held in this tab for an unstored result, or null.
+ */
+function ResultCard({ item, artifactId, local }: { item: OptimizerItem; artifactId: string | null; local: LocalOutput | null }) {
   const result = item.result!;
+  // Where the converted image is read from: the stored file, or the copy in this tab.
+  const outputSrc = artifactId ? artifactUrl(artifactId, false) : local ? local.url : null;
   const sameAspect =
     result.inputWidth &&
     result.inputHeight &&
@@ -253,10 +287,10 @@ function ResultCard({ item, artifactId }: { item: OptimizerItem; artifactId: str
       </div>
 
       <div className="mt-4">
-        {artifactId && sameAspect ? (
+        {outputSrc && sameAspect ? (
           <CompareSlider
             beforeSrc={item.preview}
-            afterSrc={artifactUrl(artifactId, false)}
+            afterSrc={outputSrc}
             alt={item.file.name}
             width={result.outputWidth ?? 1}
             height={result.outputHeight ?? 1}
@@ -268,9 +302,9 @@ function ResultCard({ item, artifactId }: { item: OptimizerItem; artifactId: str
               <figcaption className="mt-1.5 font-mono text-2xs text-muted">original</figcaption>
             </figure>
             <figure className="grid place-items-center border-l border-line p-2">
-              {artifactId ? (
+              {outputSrc ? (
                 <img
-                  src={artifactUrl(artifactId, false)}
+                  src={outputSrc}
                   alt={`Optimized ${item.file.name}`}
                   className="max-h-40 w-auto max-w-full object-contain"
                 />
@@ -312,8 +346,20 @@ function ResultCard({ item, artifactId }: { item: OptimizerItem; artifactId: str
               Inspect
             </ButtonLink>
           </>
+        ) : local ? (
+          <>
+            <a className={buttonClass({ variant: "primary", size: "sm" })} href={local.url} download={local.filename}>
+              <Download className="size-3.5" aria-hidden />
+              Download
+            </a>
+            <p className="self-center text-xs text-muted">Not stored. This copy is kept only in this tab.</p>
+          </>
         ) : (
-          <p className="text-xs text-muted">Not stored, so there is no file to download.</p>
+          <p className="text-xs text-muted">
+            {result.inlineSkipped === "too_large"
+              ? "Not stored, and too large to send back with the results, so there is no file to download."
+              : "Not stored, so there is no file to download."}
+          </p>
         )}
       </div>
     </Panel>

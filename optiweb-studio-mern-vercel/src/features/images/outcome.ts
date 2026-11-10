@@ -6,16 +6,20 @@
  * two answers into one of three outcomes, so every part of the screen (banner,
  * badges, toast, download links) is driven by the same decision.
  *
+ * It also decides where a download comes from. A stored file is downloaded by
+ * URL (`storedArtifactId`). A file that was not stored can only be saved from
+ * the bytes the response carried (`inlineOutputOf`), and only in this tab.
+ *
  * It is pure and has no React or browser dependency, so it can be tested
  * directly.
  */
 import type { Tone } from "@/lib/status";
-import type { ImageOptimizeResponse, ImageResult, StorageFailureCategory } from "@/types/domain";
+import type { ImageOptimizeResponse, ImageResult, InlineOutput, StorageFailureCategory } from "@/types/domain";
 
 export type ImageOutcomeKind =
   /** At least one file was converted, and the job and its output files are stored. */
   | "stored"
-  /** At least one file was converted, but nothing was stored: no downloads and no history entry. */
+  /** At least one file was converted, but nothing was stored: no stored downloads and no history entry. */
   | "converted_not_stored"
   /** No file was converted. */
   | "conversion_failed";
@@ -31,8 +35,13 @@ export type ImageOutcome = {
   conversion: { tone: Tone; label: string };
   /** Badge for the storage result. */
   storage: { tone: Tone; label: string };
-  /** True only when output files are stored. Downloads, previews of the output and history links depend on it. */
+  /** True only when output files are stored. Downloads by URL, the server's ZIP and history links depend on it. */
   downloadsAvailable: boolean;
+  /**
+   * Converted files of this run that can be saved from this tab only, because
+   * their bytes came with the response. Always 0 when the run is stored.
+   */
+  tabDownloads: number;
   /** History ID of the stored job, or null when there is no history entry. */
   historyJobId: string | null;
   toast: { tone: Tone; title: string; description: string | null };
@@ -44,15 +53,19 @@ const files = (count: number): string => `${count} file${count === 1 ? "" : "s"}
 /** Wording used when a response says nothing was stored but gives no reason. */
 const UNKNOWN_STORAGE_FAILURE = "Storage is unavailable.";
 
+/**
+ * Both fields come from the same server value. A response counts as stored
+ * only when neither of them says otherwise.
+ */
+const isStored = (response: ImageOptimizeResponse): boolean => response.persisted === true && response.storage?.persisted !== false;
+
 export function describeImageOutcome(response: ImageOptimizeResponse): ImageOutcome {
   const submitted = response.results.length;
   const converted = response.results.filter((result) => result.status === "completed").length;
   const failed = submitted - converted;
   const counts = { submitted, converted, failed };
 
-  // Both fields come from the same server value. Treat the result as stored
-  // only when neither of them says otherwise.
-  const stored = response.persisted === true && response.storage?.persisted !== false;
+  const stored = isStored(response);
   const reported = response.storage && response.storage.persisted === false ? response.storage : null;
   const storageFailure = stored
     ? null
@@ -65,7 +78,8 @@ export function describeImageOutcome(response: ImageOptimizeResponse): ImageOutc
         ? { tone: "warn", label: "Partly converted" }
         : { tone: "ok", label: "Converted" };
   const storage: ImageOutcome["storage"] = stored ? { tone: "ok", label: "Stored" } : { tone: "warn", label: "Not stored" };
-  const shared = { storageFailure, conversion, storage, counts };
+  const tabDownloads = response.results.filter((result) => inlineOutputOf(response, result) !== null).length;
+  const shared = { storageFailure, conversion, storage, counts, tabDownloads };
 
   if (converted === 0) {
     return {
@@ -86,18 +100,33 @@ export function describeImageOutcome(response: ImageOptimizeResponse): ImageOutc
   const rejected = failed > 0 ? ` ${files(failed)} could not be converted; the reasons are listed under Rejected files.` : "";
 
   if (!stored) {
+    const one = converted === 1;
+    const reason = storageFailure?.message ?? UNKNOWN_STORAGE_FAILURE;
+    // What can still be done with the converted files. Nothing here may read
+    // as a stored download: the copies exist in this tab and nowhere else.
+    const delivery =
+      tabDownloads === 0
+        ? `${one ? "It" : "They"} cannot be downloaded, and this run is not in History.`
+        : tabDownloads === converted
+          ? `Download ${one ? "it" : "them"} now: ${one ? "the copy exists" : "the copies exist"} only in this tab and ${one ? "is" : "are"} gone when you reload or leave the page. This run is not in History.`
+          : `${tabDownloads} of them can be downloaded now, from this tab only. The ${converted - tabDownloads === 1 ? "other is" : "others are"} too large to send back without storage. This run is not in History.`;
     return {
       ...shared,
       kind: "converted_not_stored",
       tone: "warn",
       title: "Converted, but not stored",
-      message: `${files(converted)} ${converted === 1 ? "was" : "were"} converted, but the output could not be stored. ${converted === 1 ? "It" : "They"} cannot be downloaded, and this run is not in History.${rejected}`,
+      message: `${files(converted)} ${one ? "was" : "were"} converted, but the output could not be stored. ${delivery}${rejected}`,
       downloadsAvailable: false,
       historyJobId: null,
       toast: {
         tone: "warn",
         title: "Converted, but not stored",
-        description: `Nothing can be downloaded for this run. ${storageFailure?.message ?? UNKNOWN_STORAGE_FAILURE}`,
+        description:
+          tabDownloads === 0
+            ? `Nothing can be downloaded for this run. ${reason}`
+            : tabDownloads === converted
+              ? `Download ${one ? "the file now; it is" : "the files now; they are"} kept only in this tab. ${reason}`
+              : `${tabDownloads} of ${converted} files can be downloaded now, from this tab only. ${reason}`,
       },
     };
   }
@@ -132,9 +161,24 @@ export function describeImageOutcome(response: ImageOptimizeResponse): ImageOutc
  * that does not exist.
  */
 export function storedArtifactId(response: ImageOptimizeResponse, result: ImageResult): string | null {
-  const stored = response.persisted === true && response.storage?.persisted !== false;
-  if (!stored || result.status !== "completed") return null;
+  if (!isStored(response) || result.status !== "completed") return null;
   return typeof result.artifactId === "string" && result.artifactId.length > 0 ? result.artifactId : null;
+}
+
+/**
+ * The output file that came inside the response for this result, or null.
+ *
+ * It is used only when the run was not stored, the file was converted, and the
+ * payload has exactly the size the result reports. A stored run never uses it:
+ * its files are downloaded by URL.
+ */
+export function inlineOutputOf(response: ImageOptimizeResponse, result: ImageResult): InlineOutput | null {
+  if (isStored(response) || result.status !== "completed") return null;
+  const inline = result.inlineOutput;
+  if (!inline || inline.encoding !== "base64" || typeof inline.data !== "string" || typeof inline.contentType !== "string") return null;
+  if (!Number.isInteger(inline.bytes) || inline.bytes <= 0 || inline.bytes !== result.outputBytes) return null;
+  // Padded Base64 of n bytes is exactly 4 × ⌈n / 3⌉ characters long.
+  return inline.data.length === 4 * Math.ceil(inline.bytes / 3) ? inline : null;
 }
 
 /** The part of a queued upload that its result decides. */

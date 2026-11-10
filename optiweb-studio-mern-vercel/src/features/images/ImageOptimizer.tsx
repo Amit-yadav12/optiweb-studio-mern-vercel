@@ -7,13 +7,20 @@ import { FormatTag, Panel, PanelHeader } from "@/components/ui/Layout";
 import { FileDropzone } from "@/components/ui/FileDropzone";
 import { FileRow } from "@/components/ui/FileRow";
 import { ImageReview, type ItemStatus, type OptimizerItem } from "@/features/images/ImageReview";
-import { describeImageOutcome, settleResult } from "@/features/images/outcome";
+import { createLocalOutput, releaseLocalOutput, zipLocalOutputs, type LocalOutput } from "@/features/images/localOutput";
+import { describeImageOutcome, inlineOutputOf, settleResult } from "@/features/images/outcome";
 import { takeStagedFile } from "@/features/assets/transfer";
-import { ApiClientError, api, artifactUrl, downloadZip } from "@/lib/api-client";
+import { ApiClientError, api, artifactUrl, downloadZip, triggerDownload } from "@/lib/api-client";
 import { clamp, formatBytes, formatDuration } from "@/lib/format";
-import type { ImageOptimizeResponse, ImageResult, Preferences } from "@/types/domain";
+import type { ImageOptimizeResponse, Preferences } from "@/types/domain";
 
 type Item = OptimizerItem;
+
+/** Releases the object URLs an upload holds: its preview and, if any, its converted copy. */
+function releaseItem(item: Item): void {
+  URL.revokeObjectURL(item.preview);
+  releaseLocalOutput(item.localOutput);
+}
 
 export type OptimizerLimits = {
   maxFileMb: number;
@@ -51,7 +58,7 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
-      for (const item of itemsRef.current) URL.revokeObjectURL(item.preview);
+      for (const item of itemsRef.current) releaseItem(item);
     };
   }, []);
 
@@ -160,13 +167,13 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
   const removeItem = (key: string) => {
     setItems((current) => {
       const target = current.find((item) => item.key === key);
-      if (target) URL.revokeObjectURL(target.preview);
+      if (target) releaseItem(target);
       return current.filter((item) => item.key !== key);
     });
   };
 
   const reset = () => {
-    for (const item of items) URL.revokeObjectURL(item.preview);
+    for (const item of items) releaseItem(item);
     setItems([]);
     setResponse(null);
     setFailure(null);
@@ -215,29 +222,48 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
       });
       const elapsed = performance.now() - started;
 
-      setResponse(data);
-      const resultByKey = new Map<string, ImageResult>();
-      data.results.forEach((result, index) => {
+      // A file that could not be stored arrives inside the response. Decode
+      // each one once, here, and keep it in this tab. A payload that cannot be
+      // decoded is removed from the response too, so the summary and the file
+      // list never disagree about what can be downloaded.
+      const localByResult = new Map<string, LocalOutput>();
+      const unreadable = new Set<string>();
+      for (const result of data.results) {
+        const inline = inlineOutputOf(data, result);
+        if (!inline) continue;
+        const local = createLocalOutput(inline, result.outputFilename);
+        if (local) localByResult.set(result.id, local);
+        else unreadable.add(result.id);
+      }
+      const shown: ImageOptimizeResponse =
+        unreadable.size === 0
+          ? data
+          : { ...data, results: data.results.map((result) => (unreadable.has(result.id) ? { ...result, inlineOutput: null } : result)) };
+
+      setResponse(shown);
+      // Whether a file has a download, and where it comes from, is decided
+      // once, from this response.
+      const settledByKey = new Map<string, Partial<Item>>();
+      shown.results.forEach((result, index) => {
         const key = pendingKeys[index];
-        if (key) resultByKey.set(key, result);
+        if (key) settledByKey.set(key, { ...settleResult(shown, result), localOutput: localByResult.get(result.id) ?? null });
       });
       setItems((current) =>
         current.map((item) => {
-          const result = resultByKey.get(item.key);
-          // Whether this file has a download is decided once, from this response.
-          return result ? { ...item, ...settleResult(data, result) } : item;
+          const settled = settledByKey.get(item.key);
+          return settled ? { ...item, ...settled } : item;
         }),
       );
 
       // The toast states the same outcome as the results panel: stored,
       // converted but not stored, or conversion failed.
-      const outcome = describeImageOutcome(data);
+      const outcome = describeImageOutcome(shown);
       push({
         tone: outcome.toast.tone,
         title: outcome.toast.title,
         description:
           outcome.toast.description ??
-          `${formatBytes(data.totals.savedBytes)} saved · finished in ${formatDuration(elapsed)}`,
+          `${formatBytes(shown.totals.savedBytes)} saved · finished in ${formatDuration(elapsed)}`,
       });
     } catch (error) {
       const cancelled = error instanceof ApiClientError && error.code === "cancelled";
@@ -273,6 +299,21 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
     } catch (error) {
       const message = error instanceof Error ? error.message : "The bundle could not be created.";
       push({ tone: "danger", title: "Bundle failed", description: message });
+    } finally {
+      setZipping(false);
+    }
+  };
+
+  /** Bundles unstored files held in this tab. Nothing is requested from the server. */
+  const downloadLocal = async (outputs: LocalOutput[]) => {
+    if (outputs.length === 0) return;
+    setZipping(true);
+    try {
+      const bundle = await zipLocalOutputs(outputs);
+      triggerDownload(URL.createObjectURL(bundle), "optiweb-images.zip");
+      push({ tone: "ok", title: "Bundle ready", description: `${outputs.length} optimized file${outputs.length === 1 ? "" : "s"} downloaded from this tab.` });
+    } catch {
+      push({ tone: "danger", title: "Bundle failed", description: "The files could not be bundled. Download them one at a time instead." });
     } finally {
       setZipping(false);
     }
@@ -449,7 +490,7 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
 
       {/* ---------------------------------------------------------- review */}
       {showResults && response ? (
-        <ImageReview response={response} items={items} zipping={zipping} onDownloadAll={downloadAll} onReset={reset} />
+        <ImageReview response={response} items={items} zipping={zipping} onDownloadAll={downloadAll} onDownloadLocal={downloadLocal} onReset={reset} />
       ) : null}
 
       {items.length === 0 && !busy ? (
@@ -465,7 +506,8 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
                 browser session so you can download them again. Artifacts expire after the configured retention period (30 days by default). Conversion
                 happens on the server; if the output is larger than the source, the result is reported as a
                 negative saving rather than discarded. If the output cannot be stored, the results say so and
-                offer no download.
+                the converted files are sent back with the results instead: you can save them from this tab,
+                but they are not kept on the server and do not appear in History.
               </p>
               <ButtonLink href="/app/assets" variant="ghost" size="sm" className="mt-2 px-0">
                 Not sure which file to optimize? Analyze it first
