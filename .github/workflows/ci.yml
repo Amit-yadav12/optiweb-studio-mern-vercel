@@ -1,8 +1,16 @@
 name: CI
 
-# Builds the app and runs every automated check, including the API workflow
-# against a real, throwaway MongoDB server. The database lives only for the
-# duration of the job, so destructive tests never touch Atlas or production data.
+# Builds the app and runs every automated check, including the persistence and
+# API workflows against a real, throwaway MongoDB server. The database lives
+# only for the duration of the job, so destructive tests never touch Atlas or
+# production data.
+#
+# Once the build succeeds, every test step runs even if an earlier one failed,
+# so a single run reports all failures.
+#
+# On `main`, a second job then checks the production site itself: that it
+# serves the build of this commit, that the API is deployed with it, and that an
+# image can be converted and downloaded.
 
 on:
   push:
@@ -55,15 +63,38 @@ jobs:
         run: npm run lint
 
       - name: Build
+        id: build
         run: npm run build
 
       - name: Static accessibility checks
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run test:a11y
 
       - name: Netlify function adapter checks (no database)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run test:function
 
+      - name: Image outcome checks for the results panel (no database)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:ui
+
+      - name: Image Optimizer screen in a DOM, from upload to download (no database)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:dom
+
+      - name: Storage diagnostics for every failure category (no database)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:storage
+
+      - name: Persistence, rollback and credential checks against an isolated MongoDB
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_storage_${{ github.run_id }}_${{ github.run_attempt }}
+          NODE_ENV: test
+        run: npm run test:storage:mongo
+
       - name: API and persistence workflow against an isolated MongoDB
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_${{ github.run_id }}_${{ github.run_attempt }}
           NODE_ENV: test
@@ -79,7 +110,45 @@ jobs:
           set +e
           node scripts/api-selftest.mjs http://127.0.0.1:5000
           STATUS=$?
+          # The check that the production job runs, here against a server with a
+          # database: the converted file is stored and downloaded by its URL.
+          node scripts/deployed-smoke.mjs http://127.0.0.1:5000 --expect-build
+          SMOKE=$?
           set -e
           echo "----- server log -----"
           cat server.log
-          exit "$STATUS"
+          if [ "$STATUS" -ne 0 ] || [ "$SMOKE" -ne 0 ]; then exit 1; fi
+
+  production:
+    name: Production serves this build and converts an image
+    # Production is deployed from `main` by the hosting provider, in parallel
+    # with this workflow. Run the workflow by hand on `main` to check the site
+    # again at any time.
+    if: ${{ github.ref == 'refs/heads/main' }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Set the repository variable PRODUCTION_URL to check another address.
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL || 'https://optiweb-studio-mern-vercel.vercel.app' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: optiweb-studio-mern-vercel/.nvmrc
+          cache: npm
+          cache-dependency-path: optiweb-studio-mern-vercel/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build, to know which app script this commit produces
+        run: npm run build
+
+      # Waits up to ten minutes for the deployment of this commit. Uploads one
+      # small generated image; when the database is ready it is stored under a
+      # throwaway session and expires like any other result.
+      - name: Check the production site
+        run: node scripts/deployed-smoke.mjs "$PRODUCTION_URL" --expect-build --wait 600

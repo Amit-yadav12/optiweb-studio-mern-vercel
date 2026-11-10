@@ -70,7 +70,7 @@ function finding(
   };
 }
 
-export type AssetAnalysisResult = Omit<AssetAnalysisResponse, "jobId" | "persisted">;
+export type AssetAnalysisResult = Omit<AssetAnalysisResponse, "jobId" | "persisted" | "storage">;
 
 export async function analyzeAssets(
   files: AnalyzerInput[],

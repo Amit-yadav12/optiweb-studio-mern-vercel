@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { APP_NAME } from "./server/config/env.js";
 import { probeMongo } from "./server/db/mongo.js";
 import { jsonOk, route as routeWrapper } from "./server/http/handler.js";
+import { isValidRequestId, runWithRequestContext } from "./server/http/requestContext.js";
 import * as imageOptimize from "./server/routeHandlers/images/optimize/route.js";
 import * as imageBatch from "./server/routeHandlers/images/optimize/batch/route.js";
 import * as assetsAnalyze from "./server/routeHandlers/assets/analyze/route.js";
@@ -26,8 +27,8 @@ app.set("trust proxy", 1);
 // Correlate a browser request with safe, minimal server diagnostics. Never log
 // request bodies, cookies, filenames, or environment values.
 app.use((req, res, next) => {
-  const supplied = req.get("x-request-id") ?? "";
-  const requestId = /^[a-zA-Z0-9-]{8,64}$/.test(supplied) ? supplied : randomUUID();
+  const supplied = req.get("x-request-id");
+  const requestId = isValidRequestId(supplied) ? supplied : randomUUID();
   const startedAt = Date.now();
   res.locals.requestId = requestId;
   res.setHeader("X-Request-Id", requestId);
@@ -83,10 +84,20 @@ function toWebRequest(req: ExpressRequest): Request {
   return new Request(url, { method: req.method, headers });
 }
 
+/**
+ * Runs a handler with this request's ID readable by everything it calls. The
+ * storage layer uses it to put the same ID in its log lines that the client
+ * receives in `X-Request-Id` and `meta.requestId`. The context is entered here,
+ * after body parsing, so it does not depend on how a parser schedules callbacks.
+ */
+function inRequestContext<T>(res: ExpressResponse, run: () => T): T {
+  return runWithRequestContext({ requestId: String(res.locals.requestId) }, run);
+}
+
 function bridge(handler: WebHandler) {
   return async (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
     try {
-      const result = await handler(toWebRequest(req));
+      const result = await inRequestContext(res, () => handler(toWebRequest(req)));
       await sendWebResponse(result, res);
     } catch (error) { next(error); }
   };
@@ -96,7 +107,7 @@ function bridgeDynamic(handler: DynamicWebHandler) {
   return async (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
     try {
       const rawId = req.params.id;
-      const result = await handler(toWebRequest(req), { params: Promise.resolve({ id: Array.isArray(rawId) ? rawId[0] ?? "" : rawId }) });
+      const result = await inRequestContext(res, () => handler(toWebRequest(req), { params: Promise.resolve({ id: Array.isArray(rawId) ? rawId[0] ?? "" : rawId }) }));
       await sendWebResponse(result, res);
     } catch (error) { next(error); }
   };
@@ -110,8 +121,15 @@ async function sendWebResponse(response: Response, res: ExpressResponse): Promis
   res.send(bytes);
 }
 
+// Both health endpoints answer HTTP 200 whenever the API itself is running and
+// report database readiness in the body, because every tool except history and
+// downloads works without a database. `database` holds only booleans, a latency
+// and, when not ready, a failure category with fixed wording: never the
+// connection string, a host name or a driver message.
+//
+// `/api/health` is the liveness check: its `ok` is true when the API answers.
 app.get("/api/health", async (_req, res) => {
-  const database = await probeMongo();
+  const database = await inRequestContext(res, () => probeMongo());
   let sharpVersion: string | undefined;
   try { sharpVersion = `${sharp.versions.sharp} (libvips ${sharp.versions.vips})`; } catch { /* optional runtime detail */ }
   res.status(200).json({
@@ -124,11 +142,14 @@ app.get("/api/health", async (_req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+// `/api/v1/health` is the readiness check: `data.ok` is true only when the
+// database accepted the connection, answered a ping, and accepted a read and
+// a write command on the job collection.
 app.get("/api/v1/health", bridge(routeWrapper(async (_request, ctx) => {
   const database = await probeMongo();
   let sharpVersion: string | undefined;
   try { sharpVersion = `${sharp.versions.sharp} (libvips ${sharp.versions.vips})`; } catch { /* optional */ }
-  const body = { ok: database.connected, service: APP_NAME, version: process.env.npm_package_version ?? "1.1.0", database, sharp: { available: Boolean(sharpVersion), versions: sharpVersion }, uptimeSeconds: Math.round(process.uptime()), timestamp: new Date().toISOString() };
+  const body = { ok: database.ready, service: APP_NAME, version: process.env.npm_package_version ?? "1.1.0", database, sharp: { available: Boolean(sharpVersion), versions: sharpVersion }, uptimeSeconds: Math.round(process.uptime()), timestamp: new Date().toISOString() };
   return jsonOk(body, ctx);
 })));
 

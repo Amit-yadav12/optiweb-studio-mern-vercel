@@ -8,7 +8,7 @@
 - **Font Optimizer:** PostCSS parses `@font-face` declarations, reports malformed rules and missing `font-display`, applies `auto`, `block`, `swap`, `fallback`, or `optional`, and offers the exact resulting stylesheet for copy/download.
 - **Asset Analyzer:** Reports measured image format, dimensions, and size, plus clearly labelled heuristic recommendations. CSS is routed through the font analysis workflow. It does not infer a file's rendered dimensions on a website.
 - **Website Performance Audit:** Fetches a public document and a bounded set of discovered resources with SSRF checks, redirects revalidated, response caps, and time budgets. PageSpeed lab/field metrics appear only when the provider returns them. This is not a browser-rendered crawl.
-- **History and Settings:** Mongoose persists session-owned jobs, binary artifacts, and preferences in MongoDB Atlas. History is not durable when the database is not configured; the UI labels that state and disables artifact downloads rather than pretending they work.
+- **History and Settings:** Mongoose persists session-owned jobs, binary artifacts, and preferences in MongoDB Atlas. History is not durable when the database is not configured; the UI labels that state and disables artifact downloads rather than pretending they work. A converted image that could not be stored is returned with the response instead, so it can still be saved from the open tab; it is labelled as not stored and is not listed in History.
 - **Appearance:** Light, Dark, and System themes with a pre-paint theme bootstrap, persistent choice, and reduced-motion support.
 
 A smaller image is not proof of improved LCP, INP, or CLS. Savings shown by the optimizer are measured byte differences; website-level performance depends on resource discovery, priority, rendering, and usage.
@@ -16,12 +16,13 @@ A smaller image is not proof of improved LCP, INP, or CLS. Savings shown by the 
 ## Architecture
 
 - Frontend: React 19, TypeScript, Vite, React Router, Tailwind CSS v4; Inter and JetBrains Mono are locally bundled.
-- Backend: one Express 5 application in `src/app.ts`, shared by the local `src/index.ts` launcher and Netlify Functions.
+- Backend: one Express 5 application in `src/app.ts`, shared by the local `src/index.ts` launcher, the Netlify Function and the Vercel Function.
 - Netlify adapter: `netlify/functions/api.ts` uses the documented `serverless-http` Express adapter. Netlify rewrites `/api/*` to this single function; the original `/api/...` path is retained for the existing Express routes.
+- Vercel adapter: `api/index.ts` exports the same Express app as a Vercel Function. `vercel.json` rewrites `/api/*` to it and falls back to `index.html` for client-side routes.
 - Database: MongoDB Atlas through Mongoose. The shared connection promise and warm-instance connection cache live in `src/server/db/mongo.ts`.
 - Image and CSS processing: Sharp with libvips; PostCSS.
 
-The prior Vercel-only entry point and `vercel.json` were removed so the repository has one documented deployment target: Netlify.
+Both hosts are configured. A deployment that lacks its adapter serves the home page only: every `/api` request and every deep link gets the host's "not found" page. See "The API answers with a page instead of JSON" in [`docs/deployment.md`](docs/deployment.md).
 
 ## Local development
 
@@ -45,7 +46,7 @@ Configure Atlas with a restricted database user and an IP/network policy that ma
 
 Collections are `optiweb_jobs`, `optiweb_artifacts`, and `optiweb_preferences`. Artifact documents use a TTL index. Guest data is scoped to an opaque HTTP-only `ow_sid` cookie; this is session history, not an account system. Image artifacts are deliberately bounded for Function and MongoDB document limits. Larger files need a separately designed object-storage/worker path.
 
-Health: `/api/v1/health` returns MongoDB connection state and measured probe latency without revealing the URI. A `200` response alone does not mean persistence is ready; check `data.database.connected`.
+Health: `/api/v1/health` reports whether MongoDB is ready for reads and writes, with the measured latency of the check, without revealing the URI. It always answers `200`, so check `data.database.ready`. When it is false, `data.database.category` names the cause, for example `not_configured`, `authentication_failed` or `network_access_denied`. The full list and the log format are in `docs/deployment.md` under "Storage diagnostics".
 
 ## Netlify deployment
 
@@ -69,9 +70,16 @@ npm run typecheck
 npm run lint
 npm run test:a11y
 npm run test:function
+npm run test:ui
+npm run test:dom
+npm run test:storage
 ```
 
 `test:function` exercises the real `serverless-http` handler with synthetic Netlify-style events, including the API path, cookies, JSON, Base64 multipart uploads, Sharp conversion, and safe errors. It intentionally refuses to run when `MONGODB_URI` or `MONGO_URL` is present and explicitly verifies the no-database state; it does **not** test Atlas persistence.
+
+`test:storage` makes MongoDB fail in each diagnosed way without needing a database, `test:ui` renders the image results panel for each outcome, and `test:dom` uses the real Image Optimizer screen in jsdom from upload to download. None of them tests real persistence; `npm run test:storage:mongo` does, against a disposable database (CI runs it against a `mongo:7` container).
+
+`npm run smoke -- <base-url>` checks a deployed site from outside: the app, a deep link, the API, and one conversion with its download. It uploads one small generated image.
 
 `npm test` and `npm run test:security` target a running API and require a separate isolated test database because they create/delete test records. Never point those scripts at production. Browser-based visual/axe testing and live Netlify deployment checks must still be performed in an environment with a browser, Netlify account, and configured test database.
 

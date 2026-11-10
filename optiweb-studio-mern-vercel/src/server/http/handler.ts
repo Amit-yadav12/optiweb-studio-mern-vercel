@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ZodError, type ZodType } from "zod";
 import { ApiError, type ApiErrorCode, validationError } from "./errors.js";
+import { currentRequestId, isValidRequestId } from "./requestContext.js";
 import { consumeRateLimit, type RateLimitResult } from "../middleware/rateLimit.js";
 import type { RateLimitBucket } from "../config/env.js";
 
@@ -187,8 +188,11 @@ async function execute(
   options: HandlerOptions,
   run: (ctx: RouteContext) => Promise<Response>,
 ): Promise<Response> {
-  const suppliedRequestId = req.headers.get("x-request-id") ?? "";
-  const requestId = /^[a-zA-Z0-9-]{8,64}$/.test(suppliedRequestId) ? suppliedRequestId : randomUUID();
+  // Use the ID the Express layer assigned to this request, so the
+  // `X-Request-Id` header, `meta.requestId` and every log line agree. The
+  // fallback covers handlers that are called without that layer.
+  const suppliedRequestId = req.headers.get("x-request-id");
+  const requestId = currentRequestId() ?? (isValidRequestId(suppliedRequestId) ? suppliedRequestId : randomUUID());
   const { sessionId, issued } = resolveSession(req);
   const ctx: RouteContext = { requestId, sessionId, sessionIssued: issued };
 

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ClipboardCopy, Download, FileCode2, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { Button, buttonClass } from "@/components/ui/Button";
 import { ErrorState, StatusBadge, useToast} from "@/components/ui/Feedback";
+import { StorageNotice } from "@/components/ui/StorageNotice";
 import type { Tone } from "@/lib/status";
 import { Field, Select } from "@/components/ui/Form";
 import { DefinitionRow, Panel, PanelHeader, StatStrip } from "@/components/ui/Layout";
@@ -391,13 +392,10 @@ export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPol
               </p>
             </div>
           </Panel>
-          {patched.persisted ? null : (
-            <ErrorState
-              title="History storage is offline"
-              message="The patched CSS is shown and downloadable from your browser, but it was not stored in history."
-              hint="Configure `MONGODB_URI` to persist future runs. The CSS transformation can still be inspected if persistence is unavailable."
-            />
-          )}
+          <StorageNotice storage={patched.storage} persisted={patched.persisted} title="Patched, but not stored">
+            The patched CSS above is complete, and Download CSS saves it from this page. This run is not in History, so it
+            cannot be retrieved later.
+          </StorageNotice>
         </div>
       ) : (
         <Panel as="aside">

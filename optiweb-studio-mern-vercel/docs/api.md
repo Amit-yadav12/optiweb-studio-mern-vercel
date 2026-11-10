@@ -30,7 +30,7 @@ records are scoped to it.
 
 ### GET /api/v1/health
 
-Probes the database and sharp. Returns `ok` only when the database is reachable.
+Probes the database and sharp. Always answers HTTP 200; `data.ok` is true only when the database is ready for reads and writes (`data.database.ready`). When it is not, `data.database.category` names the cause.
 
 ### POST /api/v1/images/optimize (also /images/optimize/batch)
 
@@ -47,9 +47,15 @@ Response `data`:
 
 ```jsonc
 {
-  "jobId": string, "status": "completed | partial | failed", "persisted": boolean,
+  "jobId": string,           // History ID; empty when nothing was stored
+  "status": "completed | partial | failed",   // the conversion
+  "persisted": boolean,      // same value as storage.persisted
+  "storage": { "persisted": true } | { "persisted": false, "category": string, "message": string, "hint": string },
   "results": [{
-    "id": string,            // artifact id for downloads
+    "id": string,            // identifies the result in this response; not a download ID
+    "artifactId": string | null,   // stored output file, served by GET /api/v1/artifacts/:id
+    "inlineOutput"?: { "encoding": "base64", "contentType": string, "bytes": 0, "data": string } | null,
+    "inlineSkipped"?: "too_large",
     "filename": string,      // safe original name
     "status": "completed | failed",
     "inputBytes": 0, "outputBytes": 0, "savedBytes": 0, "savingsPercent": 0,
@@ -62,6 +68,8 @@ Response `data`:
 ```
 
 Per-file failures never abort the batch; `status: "partial"` summarises them.
+
+A converted file has exactly one of two downloads. When the job was stored (`persisted: true`), `artifactId` names the stored file. When it was not, `artifactId` is null and `inlineOutput` holds the file itself, Base64-encoded, with `bytes` equal to `outputBytes`; the server keeps no copy. One response carries at most 3 MB of such files (`OW_MAX_INLINE_MB` can lower this). A file beyond that has `inlineOutput: null` and `inlineSkipped: "too_large"`. See "Storage diagnostics" in `deployment.md` for the `storage` categories.
 
 ### POST /api/v1/css/analyze
 

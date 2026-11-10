@@ -1,4 +1,5 @@
 /** Typed browser client for the /api/v1 contract. Unwraps the response envelope. */
+import { describeNonJsonResponse } from "@/lib/api-problem";
 
 export class ApiClientError extends Error {
   readonly code: string;
@@ -61,12 +62,8 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
   try {
     parsed = text ? JSON.parse(text) : null;
   } catch {
-    const requestId = response.headers.get("x-request-id");
-    throw new ApiClientError(`The API returned a non-JSON response (HTTP ${response.status}).`, {
-      code: "bad_response",
-      hint: requestId ? `Reference ${requestId}; retry or share this reference with support.` : "Retry once. If the problem persists, contact support.",
-      status: response.status,
-    });
+    const problem = describeNonJsonResponse(response.status, response.headers.get("x-request-id"));
+    throw new ApiClientError(problem.message, { code: problem.code, hint: problem.hint, status: response.status });
   }
 
   if (!response.ok || (parsed as FailureBody | null)?.ok === false) {

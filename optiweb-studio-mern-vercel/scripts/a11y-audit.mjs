@@ -20,6 +20,7 @@ const form = await read("../src/components/ui/Form.tsx");
 const theme = await read("../src/components/ui/ThemeToggle.tsx");
 const features = await Promise.all([
   read("../src/features/images/ImageOptimizer.tsx"),
+  read("../src/features/images/ImageReview.tsx"),
   read("../src/features/fonts/FontOptimizer.tsx"),
   read("../src/features/assets/AssetAnalyzer.tsx"),
   read("../src/features/audit/WebsiteAudit.tsx"),

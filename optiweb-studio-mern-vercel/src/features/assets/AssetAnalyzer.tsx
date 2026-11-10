@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { FileSearch, Info, ScanSearch, TriangleAlert, Wand2 } from "lucide-react";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { EmptyState, ErrorState, ProgressIndicator, StatusBadge, useToast} from "@/components/ui/Feedback";
+import { StorageNotice } from "@/components/ui/StorageNotice";
 import { statusToneFor } from "@/lib/status";
 import { Panel, PanelHeader, StatStrip } from "@/components/ui/Layout";
 import { FileDropzone } from "@/components/ui/FileDropzone";
@@ -160,10 +161,14 @@ export function AssetAnalyzer({ defaults }: { defaults: { thresholdKb: number; m
                 { label: "Files scanned", value: String(result.summary.filesScanned) },
                 { label: "Findings", value: String(totalFindings) },
                 { label: "Threshold", value: `${thresholdKb} KB`, hint: "change it in Settings" },
-                { label: "Stored", value: result.persisted ? "in history" : "not stored", hint: result.persisted ? undefined : "storage offline" },
+                { label: "Stored", value: result.persisted ? "in history" : "not stored", hint: result.persisted ? undefined : "reason below" },
               ]}
             />
           </div>
+
+          <StorageNotice storage={result.storage} persisted={result.persisted} title="Analyzed, but not stored">
+            The findings below are complete. This run is not in History, so it cannot be opened again later.
+          </StorageNotice>
 
           <Panel as="aside">
             <div className="flex gap-3.5">

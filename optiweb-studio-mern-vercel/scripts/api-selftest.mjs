@@ -97,6 +97,12 @@ console.log("health");
 const health = await call("/api/v1/health");
 check("GET /api/v1/health returns 200", health.status === 200);
 check("database probe connected", health.body?.data?.database?.connected === true);
+check(
+  "database is ready for reads and writes",
+  health.body?.data?.ok === true && health.body?.data?.database?.ready === true && health.body?.data?.database?.category === undefined,
+  JSON.stringify(health.body?.data?.database),
+);
+check("health names the request", typeof health.body?.meta?.requestId === "string" && health.body.meta.requestId === health.headers.get("x-request-id"));
 check("sharp available", health.body?.data?.sharp?.available === true, JSON.stringify(health.body?.data?.sharp));
 const legacy = await call("/api/health");
 check("GET /api/health returns ok", legacy.body?.ok === true);
@@ -131,8 +137,17 @@ check(
 );
 check("webp output is smaller than the jpeg source", result && result.outputBytes < result.inputBytes);
 
+/* persistence is reported explicitly, and only a stored file has a download ID */
+check(
+  "response reports the job as stored",
+  optimize.body?.data?.persisted === true && optimize.body?.data?.storage?.persisted === true && Boolean(optimize.body?.data?.jobId),
+  JSON.stringify(optimize.body?.data?.storage),
+);
+check("stored result carries its artifactId", typeof result?.artifactId === "string" && result.artifactId === result.id);
+check("stored result does not carry its file in the response", result?.inlineOutput === undefined && result?.inlineSkipped === undefined);
+
 /* artifact download */
-const artifactId = result?.id;
+const artifactId = result?.artifactId;
 const download = await call(`/api/v1/artifacts/${artifactId}`);
 check("artifact downloads with 200", download.status === 200);
 check("artifact byte length matches report", download.body.length === result.outputBytes, `${download.body.length}`);
@@ -350,6 +365,7 @@ check("output inserts the new declaration", /font-display:\s*swap/.test(patch.bo
 check("unrelated rules are preserved", patch.body?.data?.output.includes("body{color:#111"));
 check("changed lines are reported and match the insertions", (patch.body?.data?.changedLines ?? []).length === 1, JSON.stringify(patch.body?.data?.changedLines));
 check("patched artifact is stored", Boolean(patch.body?.data?.artifactId));
+check("patch reports the job as stored", patch.body?.data?.persisted === true && patch.body?.data?.storage?.persisted === true);
 
 const malformedCss = "@font-face { font-family: 'X';";
 const malformed = await call("/api/v1/css/patch-font-display", {

@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { AlertTriangle, Check, Info, X } from "lucide-react";
+import { AlertTriangle, Check, CircleCheck, CircleX, Info, X, type LucideIcon } from "lucide-react";
 import type { Tone } from "@/lib/status";
 
 export type { Tone };
@@ -140,6 +140,66 @@ export function ErrorState({
   );
 }
 
+/* ---------------------------------- notice --------------------------------- */
+
+const NOTICE_STYLES: Record<Tone, { frame: string; accent: string }> = {
+  neutral: { frame: "border-line bg-surface-sunken", accent: "text-ink-soft" },
+  accent: { frame: "border-accent-border bg-accent-soft", accent: "text-accent-hover" },
+  ok: { frame: "border-ok-border bg-ok-soft", accent: "text-ok" },
+  warn: { frame: "border-warn-border bg-warn-soft", accent: "text-warn" },
+  danger: { frame: "border-danger-border bg-danger-soft", accent: "text-danger" },
+};
+
+const NOTICE_ICONS: Record<Tone, LucideIcon> = {
+  neutral: Info,
+  accent: Info,
+  ok: CircleCheck,
+  warn: AlertTriangle,
+  danger: CircleX,
+};
+
+/**
+ * Outcome banner in any tone. Success, warning and failure each have their own
+ * icon and their own title wording, so they are told apart without relying on
+ * colour. Body text uses the ink colours to keep its contrast on every tint.
+ *
+ * `code` is a short machine-readable reference, such as a failure category.
+ */
+export function Notice({
+  tone,
+  title,
+  children,
+  hint,
+  code,
+  action,
+}: {
+  tone: Tone;
+  title: string;
+  children: ReactNode;
+  hint?: string | null;
+  code?: string | null;
+  action?: ReactNode;
+}) {
+  const style = NOTICE_STYLES[tone];
+  const Icon = NOTICE_ICONS[tone];
+  return (
+    <div className={`flex gap-3 border px-4 py-3.5 ${style.frame}`} data-tone={tone}>
+      <Icon className={`mt-0.5 size-4 shrink-0 ${style.accent}`} aria-hidden />
+      <div className="min-w-0">
+        <p className={`text-sm font-medium ${style.accent}`}>{title}</p>
+        <div className="mt-0.5 text-sm break-words text-ink">{children}</div>
+        {hint ? <p className="mt-1.5 text-xs leading-relaxed text-ink-soft">{hint}</p> : null}
+        {code ? (
+          <p className="mt-1.5 text-2xs text-muted">
+            Reference: <span className="font-mono">{code}</span>
+          </p>
+        ) : null}
+        {action ? <div className="mt-3">{action}</div> : null}
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------- toasts --------------------------------- */
 
 type Toast = { id: string; tone: Tone; title: string; description?: string };
@@ -198,7 +258,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             key={toast.id}
             className="animate-fade-up pointer-events-auto flex w-full max-w-sm items-start gap-2.5 border border-line bg-surface px-3.5 py-3 shadow-raise"
           >
-            <span className={`mt-0.5 ${toast.tone === "ok" ? "text-ok" : toast.tone === "danger" ? "text-danger" : "text-accent"}`}>
+            <span className={`mt-0.5 ${toast.tone === "ok" ? "text-ok" : toast.tone === "danger" ? "text-danger" : toast.tone === "warn" ? "text-warn" : "text-accent"}`}>
               {TOAST_ICON[toast.tone]}
             </span>
             <div className="min-w-0 flex-1">

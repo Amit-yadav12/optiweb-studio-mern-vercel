@@ -118,7 +118,11 @@ const optimize = await invoke(makeEvent({
 const optimizeBody = json(optimize);
 check("Base64 multipart upload preserves its boundary through Netlify and Express", optimize.statusCode === 200 && optimizeBody.data.results.length === 2);
 check("two real images are converted by Sharp to WebP", optimizeBody.data.results.every((result) => result.status === "completed" && result.outputFormat === "webp" && result.outputBytes > 0));
-check("image workflow discloses that downloads require MongoDB persistence", optimizeBody.data.persisted === false && optimizeBody.data.results.every((result) => result.status === "completed"));
+check("image workflow discloses that stored downloads require MongoDB persistence", optimizeBody.data.persisted === false && optimizeBody.data.results.every((result) => result.status === "completed" && result.artifactId === null));
+const sentFiles = optimizeBody.data.results.map((result) => (result.inlineOutput?.encoding === "base64" ? Buffer.from(result.inlineOutput.data, "base64") : null));
+const sentFormats = await Promise.all(sentFiles.map((file) => (file ? sharp(file).metadata().then((meta) => meta.format, () => null) : null)));
+check("without storage, the converted files come back in the function's response, intact", sentFiles.every((file, index) => file !== null && file.length === optimizeBody.data.results[index].outputBytes) && sentFormats.every((format) => format === "webp"), sentFormats.join(", "));
+check("the function response with the files stays below Netlify's 6 MB response limit", Buffer.byteLength(optimize.body ?? "", optimize.isBase64Encoded ? "base64" : "utf8") < 6_000_000 && optimize.isBase64Encoded !== true);
 
 const avifForm = new FormData();
 avifForm.append("files", new Blob([first], { type: "image/jpeg" }), "avif-check.jpg");

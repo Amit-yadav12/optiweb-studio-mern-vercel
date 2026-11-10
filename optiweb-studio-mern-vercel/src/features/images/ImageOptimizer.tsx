@@ -1,29 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Download, Info, Package, RotateCcw, SlidersHorizontal, Trash2 } from "lucide-react";
-import { Button, ButtonLink, buttonClass } from "@/components/ui/Button";
-import { ErrorState, ProgressIndicator, StatusBadge, useToast} from "@/components/ui/Feedback";
-import { statusToneFor } from "@/lib/status";
+import { Info, SlidersHorizontal, Trash2 } from "lucide-react";
+import { Button, ButtonLink } from "@/components/ui/Button";
+import { ErrorState, ProgressIndicator, useToast} from "@/components/ui/Feedback";
 import { Field, Input, SegmentedControl } from "@/components/ui/Form";
-import { DefinitionRow, FormatTag, Panel, PanelHeader, StatStrip, TableShell, Td, Th } from "@/components/ui/Layout";
+import { FormatTag, Panel, PanelHeader } from "@/components/ui/Layout";
 import { FileDropzone } from "@/components/ui/FileDropzone";
 import { FileRow } from "@/components/ui/FileRow";
-import { SavingsChart } from "@/components/charts/SavingsChart";
-import { CompareSlider } from "@/features/images/CompareSlider";
+import { ImageReview, type ItemStatus, type OptimizerItem } from "@/features/images/ImageReview";
+import { createLocalOutput, releaseLocalOutput, zipLocalOutputs, type LocalOutput } from "@/features/images/localOutput";
+import { describeImageOutcome, inlineOutputOf, settleResult } from "@/features/images/outcome";
 import { takeStagedFile } from "@/features/assets/transfer";
-import { ApiClientError, api, artifactUrl, downloadZip } from "@/lib/api-client";
-import { clamp, formatBytes, formatDimensions, formatDuration, formatSavingsPercent } from "@/lib/format";
-import type { ImageOptimizeResponse, ImageResult, Preferences } from "@/types/domain";
+import { ApiClientError, api, artifactUrl, downloadZip, triggerDownload } from "@/lib/api-client";
+import { clamp, formatBytes, formatDuration } from "@/lib/format";
+import type { ImageOptimizeResponse, Preferences } from "@/types/domain";
 
-type ItemStatus = "ready" | "processing" | "completed" | "failed";
+type Item = OptimizerItem;
 
-type Item = {
-  key: string;
-  file: File;
-  status: ItemStatus;
-  preview: string;
-  result?: ImageResult;
-  error?: string;
-};
+/** Releases the object URLs an upload holds: its preview and, if any, its converted copy. */
+function releaseItem(item: Item): void {
+  URL.revokeObjectURL(item.preview);
+  releaseLocalOutput(item.localOutput);
+}
 
 export type OptimizerLimits = {
   maxFileMb: number;
@@ -61,7 +58,7 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
-      for (const item of itemsRef.current) URL.revokeObjectURL(item.preview);
+      for (const item of itemsRef.current) releaseItem(item);
     };
   }, []);
 
@@ -96,7 +93,16 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
     let cancelled = false;
     fetch(artifactUrl(from, false), { credentials: "same-origin" })
       .then(async (res) => {
-        if (!res.ok) throw new Error("That stored result is no longer available.");
+        if (!res.ok) {
+          // A storage failure is not the same as an expired result. The API's
+          // wording for it is fixed and safe to show.
+          const body = (await res.json().catch(() => null)) as { error?: { code?: string; message?: string } } | null;
+          throw new Error(
+            res.status === 503 && body?.error?.code === "storage_unavailable" && body.error.message
+              ? body.error.message
+              : "That stored result is no longer available.",
+          );
+        }
         const blob = await res.blob();
         const name =
           res.headers.get("x-optiweb-original-name") ??
@@ -161,13 +167,13 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
   const removeItem = (key: string) => {
     setItems((current) => {
       const target = current.find((item) => item.key === key);
-      if (target) URL.revokeObjectURL(target.preview);
+      if (target) releaseItem(target);
       return current.filter((item) => item.key !== key);
     });
   };
 
   const reset = () => {
-    for (const item of items) URL.revokeObjectURL(item.preview);
+    for (const item of items) releaseItem(item);
     setItems([]);
     setResponse(null);
     setFailure(null);
@@ -216,32 +222,48 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
       });
       const elapsed = performance.now() - started;
 
-      setResponse(data);
-      const resultByKey = new Map<string, ImageResult>();
-      data.results.forEach((result, index) => {
+      // A file that could not be stored arrives inside the response. Decode
+      // each one once, here, and keep it in this tab. A payload that cannot be
+      // decoded is removed from the response too, so the summary and the file
+      // list never disagree about what can be downloaded.
+      const localByResult = new Map<string, LocalOutput>();
+      const unreadable = new Set<string>();
+      for (const result of data.results) {
+        const inline = inlineOutputOf(data, result);
+        if (!inline) continue;
+        const local = createLocalOutput(inline, result.outputFilename);
+        if (local) localByResult.set(result.id, local);
+        else unreadable.add(result.id);
+      }
+      const shown: ImageOptimizeResponse =
+        unreadable.size === 0
+          ? data
+          : { ...data, results: data.results.map((result) => (unreadable.has(result.id) ? { ...result, inlineOutput: null } : result)) };
+
+      setResponse(shown);
+      // Whether a file has a download, and where it comes from, is decided
+      // once, from this response.
+      const settledByKey = new Map<string, Partial<Item>>();
+      shown.results.forEach((result, index) => {
         const key = pendingKeys[index];
-        if (key) resultByKey.set(key, result);
+        if (key) settledByKey.set(key, { ...settleResult(shown, result), localOutput: localByResult.get(result.id) ?? null });
       });
       setItems((current) =>
         current.map((item) => {
-          const result = resultByKey.get(item.key);
-          if (!result) return item;
-          return result.status === "completed"
-            ? { ...item, status: "completed", result, error: undefined }
-            : { ...item, status: "failed", result, error: result.message ?? "Processing failed." };
+          const settled = settledByKey.get(item.key);
+          return settled ? { ...item, ...settled } : item;
         }),
       );
 
-      const okCount = data.results.filter((result) => result.status === "completed").length;
+      // The toast states the same outcome as the results panel: stored,
+      // converted but not stored, or conversion failed.
+      const outcome = describeImageOutcome(shown);
       push({
-        tone: data.status === "failed" ? "danger" : data.status === "partial" ? "warn" : "ok",
-        title:
-          data.status === "failed"
-            ? "No file could be converted"
-            : data.status === "partial"
-              ? `${okCount} of ${data.results.length} files converted`
-              : `${okCount} file${okCount === 1 ? "" : "s"} converted`,
-        description: `${formatBytes(data.totals.savedBytes)} saved · finished in ${formatDuration(elapsed)}`,
+        tone: outcome.toast.tone,
+        title: outcome.toast.title,
+        description:
+          outcome.toast.description ??
+          `${formatBytes(shown.totals.savedBytes)} saved · finished in ${formatDuration(elapsed)}`,
       });
     } catch (error) {
       const cancelled = error instanceof ApiClientError && error.code === "cancelled";
@@ -267,8 +289,8 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
   const failed = useMemo(() => items.filter((item) => item.status === "failed"), [items]);
   const showResults = Boolean(response) && (completed.length > 0 || failed.length > 0);
 
-  const downloadAll = async () => {
-    const ids = completed.map((item) => item.result?.id).filter((id): id is string => Boolean(id));
+  /** `ids` are stored output files only; the review panel never passes anything else. */
+  const downloadAll = async (ids: string[]) => {
     if (ids.length === 0) return;
     setZipping(true);
     try {
@@ -277,6 +299,21 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
     } catch (error) {
       const message = error instanceof Error ? error.message : "The bundle could not be created.";
       push({ tone: "danger", title: "Bundle failed", description: message });
+    } finally {
+      setZipping(false);
+    }
+  };
+
+  /** Bundles unstored files held in this tab. Nothing is requested from the server. */
+  const downloadLocal = async (outputs: LocalOutput[]) => {
+    if (outputs.length === 0) return;
+    setZipping(true);
+    try {
+      const bundle = await zipLocalOutputs(outputs);
+      triggerDownload(URL.createObjectURL(bundle), "optiweb-images.zip");
+      push({ tone: "ok", title: "Bundle ready", description: `${outputs.length} optimized file${outputs.length === 1 ? "" : "s"} downloaded from this tab.` });
+    } catch {
+      push({ tone: "danger", title: "Bundle failed", description: "The files could not be bundled. Download them one at a time instead." });
     } finally {
       setZipping(false);
     }
@@ -453,146 +490,7 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
 
       {/* ---------------------------------------------------------- review */}
       {showResults && response ? (
-        <section aria-labelledby="review-panel" className="animate-fade-up flex flex-col gap-6">
-          <Panel aria-labelledby="review-panel">
-            <PanelHeader
-              id="review-panel"
-              title="3 · Review results"
-              description="Every value below was measured from the produced buffers."
-              meta={<StatusBadge tone={statusToneFor(response.status)}>{response.status}</StatusBadge>}
-              actions={
-                <div className="flex flex-wrap items-center gap-2">
-                  {completed.length > 1 && response.persisted ? (
-                    <Button variant="secondary" size="sm" onClick={downloadAll} loading={zipping} leading={<Package className="size-3.5" aria-hidden />}>
-                      Download all (ZIP)
-                    </Button>
-                  ) : null}
-                  <Button variant="ghost" size="sm" onClick={reset} leading={<RotateCcw className="size-3.5" aria-hidden />}>
-                    Optimize another file
-                  </Button>
-                </div>
-              }
-            />
-            {response.persisted ? null : (
-              <div className="mb-4">
-                <ErrorState
-                  title="History storage is offline"
-                  message="Results were produced, but they are not stored, so downloads and history are unavailable for this run."
-                  hint="Configure `MONGODB_URI` in your environment, verify `/api/v1/health`, then process the files again."
-                />
-              </div>
-            )}
-            <StatStrip
-              items={[
-                { label: "Input", value: formatBytes(response.totals.inputBytes), hint: `${response.results.length} files submitted` },
-                { label: "Output", value: formatBytes(response.totals.outputBytes), hint: `${completed.length} converted` },
-                {
-                  label: "Saved",
-                  value: formatBytes(response.totals.savedBytes),
-                  hint: formatSavingsPercent(response.totals.savingsPercent),
-                },
-                { label: "Failed", value: String(failed.length), hint: failed.length > 0 ? "details below" : "nothing rejected" },
-              ]}
-            />
-            {completed.length > 0 ? (
-              <div className="mt-5 border border-line">
-                <p className="border-b border-line px-4 py-2.5 text-2xs font-medium tracking-[0.1em] text-muted uppercase">
-                  Weight comparison
-                </p>
-                <div className="p-4">
-                  <SavingsChart
-                    rows={completed.map((item) => ({
-                      label: shorten(item.file.name),
-                      input: item.result!.inputBytes,
-                      output: item.result!.outputBytes,
-                    }))}
-                    max={Math.max(...completed.map((item) => item.result!.inputBytes))}
-                  />
-                </div>
-              </div>
-            ) : null}
-          </Panel>
-
-          {failed.length > 0 ? (
-            <Panel>
-              <PanelHeader title="Rejected files" description="These uploads were not converted. The rest of the batch is unaffected." />
-              <ul className="flex flex-col gap-2">
-                {failed.map((item) => (
-                  <li key={item.key} className="border border-danger-border bg-danger-soft px-3 py-2.5">
-                    <p className="truncate text-sm text-ink">{item.file.name}</p>
-                    <p className="mt-0.5 text-xs text-danger/85">{item.error}</p>
-                  </li>
-                ))}
-              </ul>
-            </Panel>
-          ) : null}
-
-          {completed.length > 0 ? (
-            <>
-              <Panel padded={false}>
-                <div className="px-4 pt-4 sm:px-5">
-                  <PanelHeader title="Batch table" description="Aligned figures for scanning a large batch." />
-                </div>
-                <TableShell minWidth={760}>
-                  <thead>
-                    <tr>
-                      <Th>File</Th>
-                      <Th numeric>Before</Th>
-                      <Th numeric>After</Th>
-                      <Th numeric>Saved</Th>
-                      <Th numeric>Dimensions</Th>
-                      <Th>Format</Th>
-                      <Th numeric>Time</Th>
-                      <Th numeric>Download</Th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {completed.map((item) => (
-                      <tr key={item.key}>
-                        <Td mono>
-                          <span className="block max-w-[13rem] truncate" title={item.file.name}>
-                            {item.file.name}
-                          </span>
-                        </Td>
-                        <Td numeric>{formatBytes(item.result!.inputBytes)}</Td>
-                        <Td numeric>{formatBytes(item.result!.outputBytes)}</Td>
-                        <Td numeric>
-                          <span className={item.result!.savedBytes >= 0 ? "text-ok" : "text-danger"}>
-                            {formatBytes(item.result!.savedBytes)}
-                          </span>
-                          <span className="ml-1.5 text-muted">{formatSavingsPercent(item.result!.savingsPercent)}</span>
-                        </Td>
-                        <Td numeric>{formatDimensions(item.result!.outputWidth, item.result!.outputHeight)}</Td>
-                        <Td mono>{item.result!.outputFormat}</Td>
-                        <Td numeric>{formatDuration(item.result!.durationMs)}</Td>
-                        <Td numeric>
-                          {response.persisted ? (
-                            <a
-                              className="inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:text-accent-hover hover:underline"
-                              href={artifactUrl(item.result!.id)}
-                              download
-                            >
-                              <Download className="size-3.5" aria-hidden />
-                              Save
-                            </a>
-                          ) : (
-                            <span className="text-xs text-muted" title="Downloads require configured MongoDB persistence">Unavailable</span>
-                          )}
-                        </Td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </TableShell>
-              </Panel>
-
-              <div className="grid gap-4 xl:grid-cols-2">
-                {completed.map((item) => (
-                  <ResultCard key={item.key} item={item} persisted={response.persisted} />
-                ))}
-              </div>
-            </>
-          ) : null}
-        </section>
+        <ImageReview response={response} items={items} zipping={zipping} onDownloadAll={downloadAll} onDownloadLocal={downloadLocal} onReset={reset} />
       ) : null}
 
       {items.length === 0 && !busy ? (
@@ -607,7 +505,9 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
                 Uploads are decoded in memory, re-encoded with sharp, and stored as an artifact tied to this
                 browser session so you can download them again. Artifacts expire after the configured retention period (30 days by default). Conversion
                 happens on the server; if the output is larger than the source, the result is reported as a
-                negative saving rather than discarded.
+                negative saving rather than discarded. If the output cannot be stored, the results say so and
+                the converted files are sent back with the results instead: you can save them from this tab,
+                but they are not kept on the server and do not appear in History.
               </p>
               <ButtonLink href="/app/assets" variant="ghost" size="sm" className="mt-2 px-0">
                 Not sure which file to optimize? Analyze it first
@@ -618,106 +518,4 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
       ) : null}
     </div>
   );
-}
-
-function ResultCard({ item, persisted }: { item: Item; persisted: boolean }) {
-  const result = item.result!;
-  const sameAspect =
-    result.inputWidth &&
-    result.inputHeight &&
-    result.outputWidth &&
-    result.outputHeight &&
-    Math.abs(result.inputWidth / result.inputHeight - result.outputWidth / result.outputHeight) < 0.01;
-
-  return (
-    <Panel as="article" aria-label={`Result for ${item.file.name}`}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-ink" title={item.file.name}>
-            {item.file.name}
-          </p>
-          <p className="mt-0.5 truncate font-mono text-2xs text-muted" title={result.outputFilename}>
-            {result.outputFilename}
-          </p>
-        </div>
-        <StatusBadge tone={result.savedBytes >= 0 ? "ok" : "danger"}>
-          {formatSavingsPercent(result.savingsPercent)}
-        </StatusBadge>
-      </div>
-
-      <div className="mt-4">
-        {persisted && sameAspect ? (
-          <CompareSlider
-            beforeSrc={item.preview}
-            afterSrc={artifactUrl(result.id, false)}
-            alt={item.file.name}
-            width={result.outputWidth ?? 1}
-            height={result.outputHeight ?? 1}
-          />
-        ) : (
-          <div className="checker grid grid-cols-2 gap-px overflow-hidden rounded-md border border-line">
-            <figure className="grid place-items-center p-2">
-              <img src={item.preview} alt={`Original ${item.file.name}`} className="max-h-40 w-auto max-w-full object-contain" />
-              <figcaption className="mt-1.5 font-mono text-2xs text-muted">original</figcaption>
-            </figure>
-            <figure className="grid place-items-center border-l border-line p-2">
-              {persisted ? (
-                <img
-                  src={artifactUrl(result.id, false)}
-                  alt={`Optimized ${item.file.name}`}
-                  className="max-h-40 w-auto max-w-full object-contain"
-                />
-              ) : (
-                <p className="px-3 text-center text-xs text-muted">Preview unavailable because output storage is offline.</p>
-              )}
-              <figcaption className="mt-1.5 font-mono text-2xs text-muted">optimized</figcaption>
-            </figure>
-          </div>
-        )}
-      </div>
-
-      <dl className="mt-4">
-        <DefinitionRow label="Original size" value={formatBytes(result.inputBytes)} />
-        <DefinitionRow label="Optimized size" value={formatBytes(result.outputBytes)} />
-        <DefinitionRow
-          label="Saved"
-          value={
-            <span className={result.savedBytes >= 0 ? "text-ok" : "text-danger"}>
-              {formatBytes(result.savedBytes)} ({formatSavingsPercent(result.savingsPercent)})
-            </span>
-          }
-        />
-        <DefinitionRow
-          label="Dimensions"
-          value={`${formatDimensions(result.inputWidth, result.inputHeight)} → ${formatDimensions(result.outputWidth, result.outputHeight)}`}
-        />
-        <DefinitionRow label="Output format" value={`${result.outputFormat} · ${formatDuration(result.durationMs)}`} />
-      </dl>
-
-      <div className="mt-4 flex flex-wrap gap-2">
-        {persisted ? (
-          <>
-            <a className={buttonClass({ variant: "primary", size: "sm" })} href={artifactUrl(result.id)} download>
-              <Download className="size-3.5" aria-hidden />
-              Download
-            </a>
-            <ButtonLink href={`/app/assets?inspect=${result.id}`} variant="ghost" size="sm">
-              Inspect
-            </ButtonLink>
-          </>
-        ) : (
-          <Button variant="primary" size="sm" disabled title="Configure MongoDB persistence to retrieve stored artifacts">
-            <Download className="size-3.5" aria-hidden />
-            Download unavailable
-          </Button>
-        )}
-      </div>
-    </Panel>
-  );
-}
-
-function shorten(name: string, max = 16): string {
-  if (name.length <= max) return name;
-  const ext = name.slice(name.lastIndexOf("."));
-  return `${name.slice(0, max - ext.length - 1)}…${ext}`;
 }

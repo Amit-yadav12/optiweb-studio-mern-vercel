@@ -1,4 +1,4 @@
-/** Image optimization controller: validate → transform → measure → persist. */
+/** Image optimization controller: validate → transform → measure → persist, or return the files when they cannot be stored. */
 import { limits } from "../config/env.js";
 import { jsonOk, type RouteContext } from "../http/handler.js";
 import { readMultipart } from "../http/multipart.js";
@@ -9,7 +9,8 @@ import {
   optimizeWithPolicy,
   sanitizeFilename,
 } from "../services/imageService.js";
-import { persistJob } from "../services/storageService.js";
+import { planInlineOutputs, toInlineOutput } from "../services/inlineOutput.js";
+import { persistJob, storageOutcome } from "../services/storageService.js";
 import type { ImageOptimizeResponse, ImageResult } from "../../types/domain.js";
 
 type Processed = { result: ImageResult; output: Buffer | null };
@@ -67,6 +68,7 @@ async function processOne(
     return {
         result: {
           id: crypto.randomUUID(),
+          artifactId: null,
           filename: sanitizeFilename(file.filename),
           outputFilename: outcome.filename,
           status: "completed",
@@ -87,6 +89,7 @@ async function processOne(
     return {
       result: {
         id: crypto.randomUUID(),
+        artifactId: null,
         filename: sanitizeFilename(file.filename),
         outputFilename: sanitizeFilename(file.filename),
         status: "failed",
@@ -182,22 +185,38 @@ export async function optimizeUploadedImages(req: Request, ctx: RouteContext): P
     })),
   });
 
-  // When persistence succeeds, replace placeholder ids with the stored artifact
-  // ids so `/api/v1/artifacts/:id` can stream the bytes back later.
+  // Only a stored output file gets an `artifactId`, the ID that
+  // `/api/v1/artifacts/:id` serves. When storage failed, `stored.artifacts` is
+  // empty and every result keeps `artifactId: null`, so the response never
+  // names a download that does not exist. The converted files are then sent in
+  // this response instead, as far as its size limit allows.
   const artifactIds = Array.from(stored.artifacts.keys());
+  const sendInline = stored.persisted
+    ? []
+    : planInlineOutputs(processed.map(({ result, output }) => (output && result.status === "completed" ? output.byteLength : 0)));
   let cursor = 0;
-  const results = processed.map(({ result }) => {
-    if (result.status !== "completed" || !stored.persisted) return result;
-    const id = artifactIds[cursor];
-    cursor += 1;
-    return id ? { ...result, id } : result;
+  const results = processed.map(({ result, output }, index): ImageResult => {
+    if (result.status !== "completed") return result;
+    if (stored.persisted) {
+      const id = artifactIds[cursor];
+      cursor += 1;
+      return id ? { ...result, id, artifactId: id } : result;
+    }
+    if (!output) return result;
+    return sendInline[index]
+      ? { ...result, inlineOutput: toInlineOutput(output, producedContentType(result)) }
+      : { ...result, inlineOutput: null, inlineSkipped: "too_large" };
   });
 
+  // `status` describes the conversion and `storage` describes persistence.
+  // They are reported separately so a client can tell "converted but not
+  // stored" from "conversion failed".
   const body: ImageOptimizeResponse = {
     jobId: stored.jobId ?? "",
     status,
     results,
     persisted: stored.persisted,
+    storage: storageOutcome(stored),
     totals: { ...totals, savingsPercent },
   };
 

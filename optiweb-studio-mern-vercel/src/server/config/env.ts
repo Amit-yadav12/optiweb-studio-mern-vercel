@@ -44,6 +44,13 @@ export const limits = {
    * Netlify's current 6 MB Function payload ceiling, including Base64 overhead.
    */
   maxZipBytes: num(process.env.OW_MAX_ZIP_MB, 3.5) * 1024 * 1024,
+  /**
+   * Combined size of the output files one response may carry when they could
+   * not be stored (see `inlineOutput`). Base64 adds a third and the whole JSON
+   * response has to stay below the smallest serverless response limit, 4.5 MB
+   * on Vercel, so the environment can lower this value but not raise it.
+   */
+  maxInlineBytes: Math.min(num(process.env.OW_MAX_INLINE_MB, 3), 3) * 1024 * 1024,
   /** Artifact retention window. */
   artifactTtlHours: num(process.env.OW_ARTIFACT_TTL_HOURS, 720),
   /** MongoDB pool size. Keep small on serverless (1–3). */
