@@ -9,9 +9,11 @@ import { supportsAvif } from "../../services/imageService.js";
  * successfully encodes a tiny probe image.
  */
 export const GET = route(async (_req, ctx) => {
-  // A database that is slow to answer must not hold up the page: after a
-  // short wait the request limits are reported, which are always valid.
-  const [avifSupported, image] = await Promise.all([supportsAvif(), imageCapacity({ maxWaitMs: 1500 })]);
+  // The database is only asked when object storage is configured. A first
+  // connection can take a few seconds; a database that does not answer within
+  // four must not hold up the page, so the request limits are reported then.
+  // They are always valid, and the answer is reused for the next requests.
+  const [avifSupported, image] = await Promise.all([supportsAvif(), imageCapacity({ maxWaitMs: 4000 })]);
   return jsonOk(
     {
       /**

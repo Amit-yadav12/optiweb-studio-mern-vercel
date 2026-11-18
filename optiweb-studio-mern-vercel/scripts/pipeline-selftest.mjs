@@ -813,6 +813,20 @@ await resetLimits();
     await purgeJob(sessionIdOf(tess), job.id);
     skipped.push("deleting a background job through the History API (needs MongoDB); its storage cleanup was run directly instead");
   }
+  if (env.usingMongo) {
+    // "Delete all jobs and files" on the Storage page.
+    const wipe = await newSession();
+    const one = await submit(wipe, [fileSpec("w1.jpg", jpegSmall, "image/jpeg")]);
+    const two = await submit(wipe, [fileSpec("w2.png", pngAlpha, "image/png")]);
+    await drainJobs();
+    const before = await usageOf(wipe);
+    const cleared = await call("/api/v1/history", { cookie: wipe, method: "DELETE" });
+    const afterWipe = await usageOf(wipe);
+    const left = (await env.listObjects()).filter((object) => object.includes(one.job.id) || object.includes(two.job.id));
+    check("clearing History deletes every background job of the session with its files, and frees the quota", before?.usedBytes > 0 && cleared.status === 200 && cleared.json?.data?.removed === 2 && left.length === 0 && afterWipe?.usedBytes === 0 && afterWipe.files.sources === 0 && afterWipe.files.artifacts === 0, `removed ${cleared.json?.data?.removed}, ${left.length} objects left, ${afterWipe?.usedBytes} bytes used`);
+  } else {
+    skipped.push("clearing History with background jobs (needs MongoDB)");
+  }
   const after = await usageOf(tess);
   check("deleting a job removes its source and generated files from storage and frees its quota", !(await env.listObjects()).some((object) => object.includes(job.id)) && after?.usedBytes === 0 && (await store.items.countDocuments({ jobId: job.id })) === 0 && (await store.artifacts.countDocuments({ jobId: job.id })) === 0, JSON.stringify(after && { used: after.usedBytes }));
 }
