@@ -86,6 +86,20 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run test:storage
 
+      # The direct-upload pipeline, through the HTTP API, on the local storage
+      # driver. First with an in-memory stand-in for the database, which checks
+      # the application logic; then against MongoDB, which checks the queries.
+      - name: Direct-upload pipeline (in-memory database stand-in)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:pipeline
+
+      - name: Direct-upload pipeline against an isolated MongoDB
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_pipeline_${{ github.run_id }}_${{ github.run_attempt }}
+          NODE_ENV: test
+        run: npm run test:pipeline
+
       - name: Persistence, rollback and credential checks against an isolated MongoDB
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:

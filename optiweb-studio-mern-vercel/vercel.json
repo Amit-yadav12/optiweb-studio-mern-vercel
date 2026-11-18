@@ -6,9 +6,15 @@
   "outputDirectory": "dist",
   "functions": {
     "api/index.ts": {
-      "maxDuration": 60
+      "maxDuration": 300
     }
   },
+  "crons": [
+    {
+      "path": "/api/v1/internal/cron",
+      "schedule": "17 3 * * *"
+    }
+  ],
   "rewrites": [
     {
       "source": "/api/(.*)",

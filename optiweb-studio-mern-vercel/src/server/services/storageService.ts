@@ -17,7 +17,12 @@ import {
   logStorageFailure,
   type StorageStage,
 } from "../db/storageDiagnostics.js";
-import { limits } from "../config/env.js";
+import { capacity, limits } from "../config/env.js";
+import { conflict } from "../http/errors.js";
+import { purgeJob } from "../pipeline/cleanup.js";
+import { loadJobParts, snapshotItems, storageApiError } from "../pipeline/jobs.js";
+import { pipelineStore } from "../pipeline/store.js";
+import { ObjectStorageError } from "../storage/objectStorage.js";
 import type {
   HistoryEntry,
   HistoryPage,
@@ -77,6 +82,10 @@ type JobDoc = {
   note: string | null;
   items: JobItemDoc[];
   createdAt: Date;
+  /** When MongoDB removes the record (History retention). Absent on records written before this field existed. */
+  expireAt?: Date;
+  /** Set on records of the direct-upload pipeline, which carry more fields than this type lists. */
+  mode?: "async";
 };
 
 type ArtifactDoc = {
@@ -135,7 +144,10 @@ const JobSchema = new Schema<JobDoc>({
   note: { type: String, default: null, maxlength: 1000 },
   items: { type: [JobItemSchema], default: [] },
   createdAt: { type: Date, default: Date.now, index: true },
+  expireAt: { type: Date },
 }, { versionKey: false, collection: JOBS_COLLECTION });
+// History retention: MongoDB deletes a job record at its `expireAt`.
+JobSchema.index({ expireAt: 1 }, { expireAfterSeconds: 0 });
 JobSchema.index({ sessionId: 1, createdAt: -1 });
 JobSchema.index({ sessionId: 1, kind: 1, status: 1, createdAt: -1 });
 
@@ -362,6 +374,7 @@ export async function persistJob(params: {
       note: params.note ?? null,
       items,
       createdAt: now,
+      expireAt: new Date(now.getTime() + capacity.historyTtlMs),
     });
 
     stage = "artifact_insert";
@@ -434,6 +447,13 @@ export async function getJobDetail(sessionId: string, jobId: string) {
   if (!isUuid(jobId)) return null;
   const job = await withStorage("history.detail", "read", () => Job.findOne({ _id: jobId, sessionId }).lean<JobDoc | null>());
   if (!job) return null;
+  if (job.mode === "async") {
+    // A background job's files change while it runs, and its generated files
+    // expire later. Read them as they are now instead of the embedded copy.
+    const store = await pipelineStore();
+    const { items, artifacts } = await loadJobParts(store, jobId);
+    return { job, items: snapshotItems(items, artifacts) as unknown as JobItemDoc[] };
+  }
   return { job, items: job.items };
 }
 
@@ -454,26 +474,47 @@ export async function getArtifactsByIds(sessionId: string, ids: string[]) {
   return rows.map((row) => ({ id: row._id, filename: row.filename, contentType: row.contentType, data: toBuffer(row.data) }));
 }
 
+/** Removes what a background job keeps in object storage. Storage and conflict errors pass through unchanged. */
+async function purgeObjects(sessionId: string, jobId: string): Promise<boolean> {
+  try {
+    return await purgeJob(sessionId, jobId);
+  } catch (error) {
+    if (error instanceof ObjectStorageError) throw storageApiError(error);
+    throw error;
+  }
+}
+
 export async function deleteJob(sessionId: string, jobId: string): Promise<boolean> {
   if (!isUuid(jobId)) return false;
-  return withStorage("history.delete", "read", async (progress) => {
-    const job = await Job.findOne({ _id: jobId, sessionId }).lean<JobDoc | null>();
-    if (!job) return false;
-    const ids = job.items.map((item) => item.artifactId).filter((id): id is string => Boolean(id));
-    progress.stage = "write";
-    if (ids.length) await Artifact.deleteMany({ _id: { $in: ids }, sessionId });
+  const job = await withStorage("history.delete", "read", () => Job.findOne({ _id: jobId, sessionId }).lean<JobDoc | null>());
+  if (!job) return false;
+  // Files in object storage are deleted before the record that names them.
+  if (job.mode === "async" && !(await purgeObjects(sessionId, jobId))) {
+    throw conflict("This job is being processed.", "Cancel it, wait a moment, then delete it.");
+  }
+  return withStorage("history.delete", "write", async () => {
+    if (job.mode !== "async") {
+      const ids = job.items.map((item) => item.artifactId).filter((id): id is string => Boolean(id));
+      if (ids.length) await Artifact.deleteMany({ _id: { $in: ids }, sessionId });
+    }
     await Job.deleteOne({ _id: jobId, sessionId });
     return true;
   });
 }
 
 export async function clearSessionHistory(sessionId: string): Promise<number> {
-  return withStorage("history.clear", "read", async (progress) => {
-    const jobs = await Job.find({ sessionId }).select({ _id: 1, "items.artifactId": 1 }).lean<Array<{ _id: string; items: Array<{ artifactId?: string | null }> }>>();
-    const ids = jobs.flatMap((job) => job.items.map((item) => item.artifactId).filter((id): id is string => Boolean(id)));
-    progress.stage = "write";
+  const jobs = await withStorage("history.clear", "read", () =>
+    Job.find({ sessionId }).select({ _id: 1, mode: 1, "items.artifactId": 1 }).lean<Array<{ _id: string; mode?: "async"; items: Array<{ artifactId?: string | null }> }>>());
+  // Background jobs keep files in object storage. A job that a worker is
+  // processing right now is left in place; everything else is removed.
+  const kept: string[] = [];
+  for (const job of jobs.filter((candidate) => candidate.mode === "async")) {
+    if (!(await purgeObjects(sessionId, job._id))) kept.push(job._id);
+  }
+  return withStorage("history.clear", "write", async () => {
+    const ids = jobs.filter((job) => job.mode !== "async").flatMap((job) => job.items.map((item) => item.artifactId).filter((id): id is string => Boolean(id)));
     if (ids.length) await Artifact.deleteMany({ _id: { $in: ids }, sessionId });
-    const result = await Job.deleteMany({ sessionId });
+    const result = await Job.deleteMany({ sessionId, _id: { $nin: kept } });
     return result.deletedCount ?? 0;
   });
 }

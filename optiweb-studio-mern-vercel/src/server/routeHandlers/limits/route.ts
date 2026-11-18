@@ -1,5 +1,6 @@
 import { jsonOk, route } from "../../http/handler.js";
 import { limits, imageFormats, fontDisplayValues } from "../../config/env.js";
+import { advancedCapacityView, imageCapacity } from "../../pipeline/views.js";
 import { supportsAvif } from "../../services/imageService.js";
 
 /**
@@ -8,9 +9,22 @@ import { supportsAvif } from "../../services/imageService.js";
  * successfully encodes a tiny probe image.
  */
 export const GET = route(async (_req, ctx) => {
-  const avifSupported = await supportsAvif();
+  // A database that is slow to answer must not hold up the page: after a
+  // short wait the request limits are reported, which are always valid.
+  const [avifSupported, image] = await Promise.all([supportsAvif(), imageCapacity({ maxWaitMs: 1500 })]);
   return jsonOk(
     {
+      /**
+       * The Image Optimizer's limits in the mode that is in effect: `direct`
+       * (browser uploads to object storage, background job) or `request`
+       * (files inside the request). The UI shows these numbers.
+       */
+      image,
+      /** Whether the larger, not yet available capacity mode was requested, and why it is off. */
+      advancedCapacity: advancedCapacityView(),
+      /** Asset Analyzer: files per request. Their combined size is bounded by `maxBatchBytes`. */
+      maxAssetFiles: limits.maxAssetFiles,
+      // The fields below describe requests that carry files in their body.
       maxFileBytes: limits.maxFileBytes,
       maxBatchBytes: limits.maxBatchBytes,
       maxFilesPerRequest: limits.maxFilesPerRequest,

@@ -13,6 +13,32 @@ import type { OptimizationPolicy } from "../config/env.js";
 sharp.cache(false);
 sharp.concurrency(1);
 
+/**
+ * Resource limits for one image. The request path uses `requestBudget`; the
+ * background worker passes the larger budget of the direct-upload pipeline.
+ */
+export type ImageBudget = {
+  /** Largest source file, in bytes. */
+  maxFileBytes: number;
+  /** Largest decoded size: width × height × frames. */
+  maxDecodedPixels: number;
+  /** Wall-clock limit for one encode. */
+  timeoutMs: number;
+  /**
+   * Above this many pixels the multi-candidate policies do not try AVIF, the
+   * slowest encoder. A file converted to AVIF on request is not affected.
+   */
+  avifCandidateMaxPixels?: number;
+  /** Largest AVIF output in pixels. AVIF encoding of a larger image is refused, because of its memory use. */
+  avifMaxPixels?: number;
+};
+
+export const requestBudget: ImageBudget = {
+  maxFileBytes: limits.maxFileBytes,
+  maxDecodedPixels: limits.maxDecodedPixels,
+  timeoutMs: limits.imageTimeoutMs,
+};
+
 let avifSupportProbe: Promise<boolean> | null = null;
 /** Probe the actual linked libvips encoder rather than assuming AVIF from the package version. */
 export function supportsAvif(): Promise<boolean> {
@@ -73,8 +99,10 @@ export async function sniffImage(input: Buffer): Promise<Sniffed> {
     const metadata = await sharp(input, {
       failOn: "error",
       animated: true,
-      // Decoder-level cap: libvips refuses to allocate a raster larger than this.
-      limitInputPixels: limits.maxDecodedPixels,
+      // Only the header is read here; no pixel is decoded. The size limit is
+      // applied by the caller, which can then name the limit in its error,
+      // and again by the decoder when the image is opened for conversion.
+      limitInputPixels: false,
     }).metadata();
     const format = (metadata.format ?? "unknown").toLowerCase();
     const pages = metadata.pages ?? 1;
@@ -138,10 +166,10 @@ export function contentTypeForFilename(filename: string): string {
   }
 }
 
-export function assertUploadSize(byteLength: number, filename: string): void {
-  if (byteLength > limits.maxFileBytes) {
+export function assertUploadSize(byteLength: number, filename: string, budget: ImageBudget = requestBudget): void {
+  if (byteLength > budget.maxFileBytes) {
     throw payloadTooLarge(
-      `"${sanitizeFilename(filename)}" is ${(byteLength / (1024 * 1024)).toFixed(1)} MB, above the ${(limits.maxFileBytes / (1024 * 1024)).toFixed(0)} MB limit.`,
+      `"${sanitizeFilename(filename)}" is ${(byteLength / (1024 * 1024)).toFixed(1)} MB, above the ${(budget.maxFileBytes / (1024 * 1024)).toFixed(0)} MB limit.`,
       "Downscale the image locally, then upload again.",
     );
   }
@@ -182,16 +210,18 @@ export async function optimizeImage(params: {
   filename: string;
   buffer: Buffer;
   settings: ImageOptimizeSettings;
+  budget?: ImageBudget;
 }): Promise<OptimizeOutcome> {
   const { buffer, settings } = params;
+  const budget = params.budget ?? requestBudget;
   const filename = sanitizeFilename(params.filename);
-  assertUploadSize(buffer.byteLength, filename);
+  assertUploadSize(buffer.byteLength, filename, budget);
 
   const sniffed = await sniffImage(buffer);
   const decodedPixels = (sniffed.width ?? 0) * (sniffed.height ?? 0) * Math.max(1, sniffed.pages);
-  if (decodedPixels > limits.maxDecodedPixels) {
+  if (decodedPixels > budget.maxDecodedPixels) {
     throw payloadTooLarge(
-      `"${filename}" decodes to ${decodedPixels.toLocaleString()} pixels, above the ${limits.maxDecodedPixels.toLocaleString()} pixel limit.`,
+      `"${filename}" decodes to ${decodedPixels.toLocaleString()} pixels, above the ${budget.maxDecodedPixels.toLocaleString()} pixel limit.`,
       "Downscale the image locally, then upload again. This cap exists so a small compressed file cannot expand into gigabytes of RAM.",
     );
   }
@@ -221,14 +251,28 @@ export async function optimizeImage(params: {
   let pipeline = sharp(buffer, {
     failOn: "error",
     animated: sniffed.isAnimated,
-    limitInputPixels: limits.maxDecodedPixels,
+    limitInputPixels: budget.maxDecodedPixels,
   }).rotate();
   // sharp's own timeout actually stops the worker; the JS timer below is a backstop
   // that also destroys the pipeline so a hung encode cannot keep a CPU core.
-  pipeline = pipeline.timeout({ seconds: Math.max(1, Math.ceil(limits.imageTimeoutMs / 1000)) });
+  pipeline = pipeline.timeout({ seconds: Math.max(1, Math.ceil(budget.timeoutMs / 1000)) });
   const needsResize =
     (settings.maxWidth !== null && (sniffed.width ?? Infinity) > settings.maxWidth) ||
     (settings.maxHeight !== null && (sniffed.height ?? Infinity) > settings.maxHeight);
+
+  if (targetFormat === "avif" && budget.avifMaxPixels !== undefined) {
+    // Size of the image that would be encoded, after any downscaling.
+    const scale = needsResize
+      ? Math.min(1, (settings.maxWidth ?? Infinity) / (sniffed.width ?? 1), (settings.maxHeight ?? Infinity) / (sniffed.height ?? 1))
+      : 1;
+    const outputPixels = Math.round((sniffed.width ?? 0) * (sniffed.height ?? 0) * scale * scale);
+    if (outputPixels > budget.avifMaxPixels) {
+      throw unprocessable(
+        `"${filename}" would be a ${(outputPixels / 1_000_000).toFixed(1)} MP AVIF. AVIF output is limited to ${Math.round(budget.avifMaxPixels / 1_000_000)} MP here, because encoding it needs much more memory than the other formats.`,
+        "Choose WebP or JPEG, or set a maximum width so that the output is smaller.",
+      );
+    }
+  }
 
   if (needsResize) {
     pipeline = pipeline.resize({
@@ -256,7 +300,7 @@ export async function optimizeImage(params: {
 
   let output: Buffer;
   try {
-    output = await withTimeout(pipeline.toBuffer({ resolveWithObject: false }), limits.imageTimeoutMs, () => {
+    output = await withTimeout(pipeline.toBuffer({ resolveWithObject: false }), budget.timeoutMs, () => {
       try {
         pipeline.destroy();
       } catch {
@@ -318,14 +362,16 @@ export async function optimizeWithPolicy(params: {
   filename: string;
   buffer: Buffer;
   settings: ImageOptimizeSettings;
+  budget?: ImageBudget;
 }): Promise<OptimizeOutcome> {
   const policy: OptimizationPolicy = params.settings.policy ?? "single";
   if (policy === "single") {
     return optimizeImage(params);
   }
 
+  const budget = params.budget ?? requestBudget;
   const filename = sanitizeFilename(params.filename);
-  assertUploadSize(params.buffer.byteLength, filename);
+  assertUploadSize(params.buffer.byteLength, filename, budget);
   const sniffed = await sniffImage(params.buffer);
   if (sniffed.isSvg || !sniffed.isRaster) {
     return optimizeImage(params);
@@ -333,12 +379,17 @@ export async function optimizeWithPolicy(params: {
 
   const inputBytes = params.buffer.byteLength;
   const plans: Array<{ format: Exclude<ImageFormat, "original">; quality: number; note: string }> = [];
+  let skipAvif = false;
 
   if (sniffed.isAnimated) {
     plans.push({ format: "webp", quality: params.settings.quality, note: "animated → WebP only" });
   } else {
     plans.push({ format: "webp", quality: params.settings.quality, note: "lossy WebP" });
-    plans.push({ format: "avif", quality: params.settings.quality, note: "lossy AVIF" });
+    // AVIF is by far the slowest encoder. For a very large image it is left
+    // out of the comparison, and the result says so.
+    const pixels = (sniffed.width ?? 0) * (sniffed.height ?? 0);
+    skipAvif = budget.avifCandidateMaxPixels !== undefined && pixels > budget.avifCandidateMaxPixels;
+    if (!skipAvif) plans.push({ format: "avif", quality: params.settings.quality, note: "lossy AVIF" });
     if (!sniffed.hasAlpha) {
       plans.push({ format: "jpeg", quality: params.settings.quality, note: "mozjpeg" });
     }
@@ -358,6 +409,15 @@ export async function optimizeWithPolicy(params: {
   const candidates: CandidateRecord[] = [
     { format: "original", quality: 100, bytes: inputBytes, selected: false, note: "source file" },
   ];
+  if (skipAvif) {
+    candidates.push({
+      format: "avif",
+      quality: params.settings.quality,
+      bytes: Number.POSITIVE_INFINITY,
+      selected: false,
+      note: `lossy AVIF — not tried: image above ${Math.round((budget.avifCandidateMaxPixels ?? 0) / 1_000_000)} MP`,
+    });
+  }
   let best: OptimizeOutcome | null = null;
 
   for (const plan of unique) {
@@ -366,6 +426,7 @@ export async function optimizeWithPolicy(params: {
         filename,
         buffer: params.buffer,
         settings: { ...params.settings, format: plan.format, quality: plan.quality, policy: "single" },
+        budget,
       });
       candidates.push({
         format: encoded.metrics.outputFormat,
