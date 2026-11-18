@@ -86,6 +86,10 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run test:storage
 
+      - name: Website audit limits against a made-up site (no network)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:audit
+
       # The direct-upload pipeline, through the HTTP API, on the local storage
       # driver. First with an in-memory stand-in for the database, which checks
       # the application logic; then against MongoDB, which checks the queries.
@@ -145,6 +149,29 @@ jobs:
           echo "----- server log -----"
           cat server.log
           if [ "$STATUS" -ne 0 ] || [ "$SMOKE" -ne 0 ]; then exit 1; fi
+
+  # Processing time and memory at the configured limits, on this runner. Takes
+  # several minutes, so it runs only when asked for: start the workflow by
+  # hand, or put [bench] in a commit message.
+  capacity:
+    name: Capacity benchmark
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[bench]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: optiweb-studio-mern-vercel/.nvmrc
+          cache: npm
+          cache-dependency-path: optiweb-studio-mern-vercel/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run the benchmark
+        run: npm run bench:capacity
 
   production:
     name: Production serves this build and converts an image

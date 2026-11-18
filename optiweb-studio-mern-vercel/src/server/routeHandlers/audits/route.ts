@@ -6,8 +6,8 @@ import { persistJob, storageOutcome } from "../../services/storageService.js";
 
 /** POST /api/v1/audits — SSRF-safe document fetch + asset discovery. */
 export const POST = route(async (req, ctx) => {
-  const { url } = await parseJson(req, auditRequestSchema);
-  const report = await runWebsiteAudit(url);
+  const { url, extraPages } = await parseJson(req, auditRequestSchema);
+  const report = await runWebsiteAudit(url, { extraPages });
 
   const stored = await persistJob({
     sessionId: ctx.sessionId,
@@ -18,7 +18,7 @@ export const POST = route(async (req, ctx) => {
     inputBytes: report.totals.transferredBytes,
     outputBytes: 0,
     savedBytes: 0,
-    note: `${report.totals.requestsOk}/${report.totals.requestsAttempted} resources · ${report.findings.length} findings`,
+    note: `${report.pages.length} page${report.pages.length === 1 ? "" : "s"} · ${report.totals.requestsOk}/${report.totals.requestsAttempted} resources · ${report.findings.length} findings`,
     items: [
       {
         filename: "audit-report.json",

@@ -24,9 +24,11 @@
     "test:ui": "node --import tsx scripts/ui-outcome-selftest.mjs",
     "test:dom": "node --import tsx scripts/optimizer-dom-selftest.mjs",
     "test:pipeline": "node --import tsx scripts/pipeline-selftest.mjs",
+    "test:audit": "node --import tsx scripts/audit-selftest.mjs",
     "test:dom:direct": "node --import tsx scripts/optimizer-direct-dom-selftest.mjs",
     "test:a11y": "node scripts/a11y-audit.mjs",
-    "smoke": "node scripts/deployed-smoke.mjs"
+    "smoke": "node scripts/deployed-smoke.mjs",
+    "bench:capacity": "node --import tsx scripts/capacity-benchmark.mjs"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",

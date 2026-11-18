@@ -12,42 +12,21 @@ import { WebsiteAudit } from "@/features/audit/WebsiteAudit";
 import { SettingsForm } from "@/features/settings/SettingsForm";
 import { StorageUsageDetails, StorageUsagePanel } from "@/features/usage/StorageUsage";
 import { ApiClientError, api } from "@/lib/api-client";
+import { useServerLimits, wholeMb } from "@/lib/limits";
 import { formatBytes, formatNumber, formatRelativeTime } from "@/lib/format";
 import { statusToneFor } from "@/lib/status";
-import type { HistoryEntry, HistoryPage as HistoryPageData, ImageCapacity, Preferences } from "@/types/domain";
+import type { HistoryEntry, HistoryPage as HistoryPageData, Preferences } from "@/types/domain";
 
 const FALLBACK_PREFS: Preferences = {
   defaultImageFormat: "webp", defaultQuality: 78, defaultMaxWidth: null,
   fontDisplayPolicy: "swap", analyzerThresholdKb: 300, reduceMotion: false, updatedAt: null,
 };
 
-/**
- * Limits as the server reports them. `image` describes the Image Optimizer in
- * the mode that is in effect; the other fields describe requests that carry
- * files in their body. Every number shown in the workspace comes from here.
- */
-type LimitsResponse = {
-  maxFileBytes: number;
-  maxFilesPerRequest: number;
-  maxBatchBytes?: number;
-  maxAssetFiles?: number;
-  maxDecodedPixels: number;
-  artifactTtlHours: number;
-  avifSupported: boolean;
-  image?: ImageCapacity;
-};
-
-/** Used only until the server has answered, and when it cannot be reached. */
-const FALLBACK_LIMITS: LimitsResponse = { maxFileBytes: 1_048_576, maxFilesPerRequest: 4, maxBatchBytes: 3_984_588, maxDecodedPixels: 24_000_000, artifactTtlHours: 720, avifSupported: false };
-
 function useLimits() {
-  const [limits, setLimits] = useState<LimitsResponse>(FALLBACK_LIMITS);
-  useEffect(() => { api.get<LimitsResponse>("/api/v1/limits").then(setLimits).catch(() => undefined); }, []);
-  return limits;
+  return useServerLimits().limits;
 }
 
 const MB = 1024 * 1024;
-const wholeMb = (bytes: number): number => Math.max(1, Math.floor(bytes / MB));
 
 /** Why large uploads are not in use, in words for the person running the deployment. */
 const DIRECT_UNAVAILABLE: Record<string, string> = {
@@ -218,7 +197,7 @@ export function HistoryPage() {
       <div className="grid gap-3 md:grid-cols-[minmax(220px,1fr)_180px_180px_auto] md:items-end">
         <div><label className="mb-1.5 block text-xs font-medium text-ink-soft" htmlFor="history-search">Search jobs</label><div className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted" /><input id="history-search" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applyFilters(); }} placeholder="Search by job name" className="h-10 w-full border border-line-strong bg-surface pl-9 pr-3 text-sm text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15" /></div></div>
         <div><label className="mb-1.5 block text-xs font-medium text-ink-soft" htmlFor="history-kind">Job type</label><select id="history-kind" value={kind} onChange={(event) => setKind(event.target.value)} className="h-10 w-full border border-line-strong bg-surface px-3 text-sm text-ink"><option value="all">All types</option><option value="image.optimize">Images</option><option value="css.font-display">CSS</option><option value="asset.analyze">Analysis</option><option value="site.audit">Audit</option></select></div>
-        <div><label className="mb-1.5 block text-xs font-medium text-ink-soft" htmlFor="history-status">Status</label><select id="history-status" value={status} onChange={(event) => setStatus(event.target.value)} className="h-10 w-full border border-line-strong bg-surface px-3 text-sm text-ink"><option value="all">All statuses</option><option value="completed">Completed</option><option value="partial">Partial</option><option value="failed">Failed</option></select></div>
+        <div><label className="mb-1.5 block text-xs font-medium text-ink-soft" htmlFor="history-status">Status</label><select id="history-status" value={status} onChange={(event) => setStatus(event.target.value)} className="h-10 w-full border border-line-strong bg-surface px-3 text-sm text-ink"><option value="all">All statuses</option><option value="completed">Completed</option><option value="partial">Partial</option><option value="failed">Failed</option><option value="processing">Processing</option><option value="queued">Queued</option><option value="cancelled">Cancelled</option></select></div>
         <Button variant="primary" onClick={applyFilters}>Apply</Button>
       </div>
       <div className="mt-5">{error ? <ErrorState title="Could not load history" message={error} hint={hint ?? undefined} /> : busy ? <ProgressIndicator label="Loading history…" /> : data?.entries.length ? <HistoryTable entries={data.entries} /> : <EmptyState title="Nothing matches these filters" description="Try another search or run a new optimization." action={<ButtonLink href="/app/images" variant="secondary" size="sm">Optimize an image</ButtonLink>} />}</div>
@@ -231,6 +210,13 @@ export function HistoryDetailPage() {
   const { id = "" } = useParams();
   const [data, setData] = useState<{ job: { id: string; kind: string; status: string; label: string; fileCount: number; inputBytes: number; outputBytes: number; savedBytes: number; note: string | null; createdAt: string }; items: Array<{ id: string; filename: string; outputFilename: string | null; status: string; inputBytes: number; outputBytes: number; savedBytes: number; outputFormat: string | null; message: string | null; hasArtifact: boolean }> } | null>(null);
   const [error, setError] = useState<string | null>(null); const [hint, setHint] = useState<string | null>(null); const [busy, setBusy] = useState(true);
+  // A background job that is still running is read again every few seconds, until it has finished.
+  const running = data !== null && ["created", "uploading", "uploaded", "queued", "processing"].includes(data.job.status);
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => { api.get<typeof data>(`/api/v1/history/${id}`).then(setData).catch(() => undefined); }, 3000);
+    return () => window.clearInterval(timer);
+  }, [id, running]);
   useEffect(() => { let active = true; setBusy(true); api.get<typeof data>(`/api/v1/history/${id}`).then((result) => { if (active) setData(result); }).catch((err) => { if (active) { setError(err instanceof Error ? err.message : "Could not load job."); setHint(hintOf(err)); } }).finally(() => { if (active) setBusy(false); }); return () => { active = false; }; }, [id]);
   const remove = async () => { if (!window.confirm("Delete this job and its stored artifacts?")) return; try { await api.del(`/api/v1/history/${id}`); window.location.href = "/app/history"; } catch (err) { setError(err instanceof Error ? err.message : "Could not delete job."); setHint(hintOf(err)); } };
   return <PageFrame title="Job details" context="Stored optimization record" eyebrow="History" description="Inspect the metadata and artifact availability recorded for this job." maxWidth="max-w-5xl" actions={<ButtonLink href="/app/history" variant="secondary" size="sm">Back to history</ButtonLink>}>

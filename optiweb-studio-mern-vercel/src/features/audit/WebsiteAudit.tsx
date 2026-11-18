@@ -3,7 +3,7 @@ import { Globe, Info } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { ErrorState, ProgressIndicator, StatusBadge, useToast } from "@/components/ui/Feedback";
 import { StorageNotice } from "@/components/ui/StorageNotice";
-import { Field, Input } from "@/components/ui/Form";
+import { Field, Input, SegmentedControl } from "@/components/ui/Form";
 import { Panel, PanelHeader, StatStrip, TableShell, Td, Th } from "@/components/ui/Layout";
 import { ApiClientError, api } from "@/lib/api-client";
 import { formatBytes } from "@/lib/format";
@@ -13,10 +13,20 @@ type AuditResponse = {
   url: string;
   fetchedUrl: string;
   durationMs: number;
-  coverage: { mode: string; javascriptRendered: boolean; note: string };
+  coverage: {
+    mode: string;
+    javascriptRendered: boolean;
+    note: string;
+    pagesRequested?: number;
+    pagesInspected?: number;
+    limits?: { maxPages: number; maxResourcesPerPage: number; maxDocumentBytes: number; maxResourceBytes: number; maxTotalBytes: number; timeBudgetMs: number; concurrency: number };
+    stoppedBy?: string[];
+  };
+  pages?: Array<{ url: string; status: number; bytes: number; title: string | null; resourcesFound: number; resourcesRequested: number }>;
   document: { status: number; bytes: number; title: string | null };
   resources: Array<{
     url: string;
+    page?: string;
     kind: string;
     status: number | null;
     transferredBytes: number | null;
@@ -47,13 +57,15 @@ export function WebsiteAudit() {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<{ message: string; hint?: string } | null>(null);
   const [report, setReport] = useState<AuditResponse | null>(null);
+  /** Pages to inspect: the given page, plus same-origin pages it links to. */
+  const [pageCount, setPageCount] = useState<"1" | "2" | "3">("1");
 
   const run = async () => {
     if (busy) return;
     setBusy(true);
     setFailure(null);
     try {
-      const data = await api.post<AuditResponse>("/api/v1/audits", { url, extraPages: 0 });
+      const data = await api.post<AuditResponse>("/api/v1/audits", { url, extraPages: Number(pageCount) - 1 });
       setReport(data);
       push({
         tone: "ok",
@@ -90,6 +102,22 @@ export function WebsiteAudit() {
           <Button variant="primary" size="lg" onClick={run} loading={busy} leading={<Globe className="size-4" aria-hidden />}>
             {busy ? "Fetching…" : "Run audit"}
           </Button>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <SegmentedControl
+            label="Pages to inspect"
+            name="audit-pages"
+            value={pageCount}
+            onChange={setPageCount}
+            options={[
+              { value: "1", label: "This page" },
+              { value: "2", label: "2 pages" },
+              { value: "3", label: "3 pages" },
+            ]}
+          />
+          <p className="text-xs text-muted">
+            Further pages are the first links on this page that stay on the same site. Nothing beyond them is visited: this is not a crawl.
+          </p>
         </div>
         {busy ? (
           <div className="mt-4">
@@ -129,9 +157,43 @@ export function WebsiteAudit() {
                 <p className="mt-1 font-mono text-2xs text-muted">
                   {report.document.title ?? "(no title)"} · HTTP {report.document.status} · {formatBytes(report.document.bytes)}
                 </p>
+                {report.coverage.limits ? (
+                  <p className="mt-1 text-2xs text-muted">
+                    Limits of this audit: {report.coverage.limits.maxPages} pages, {report.coverage.limits.maxResourcesPerPage} resources per page,{" "}
+                    {formatBytes(report.coverage.limits.maxDocumentBytes)} per document, {formatBytes(report.coverage.limits.maxResourceBytes)} per resource,{" "}
+                    {formatBytes(report.coverage.limits.maxTotalBytes)} in total, {Math.round(report.coverage.limits.timeBudgetMs / 1000)} seconds.
+                  </p>
+                ) : null}
+                {report.coverage.stoppedBy && report.coverage.stoppedBy.length > 0 ? (
+                  <p className="mt-1 text-2xs font-medium text-warn">
+                    Cut short by: {report.coverage.stoppedBy.join(", ")}. Resources that were not read are listed as skipped.
+                  </p>
+                ) : null}
               </div>
             </div>
           </Panel>
+
+          {report.pages && report.pages.length > 1 ? (
+            <Panel>
+              <PanelHeader title="Pages inspected" description="Measured from each page's initial HTML document." />
+              <TableShell minWidth={560}>
+                <thead>
+                  <tr><Th>Page</Th><Th numeric>Status</Th><Th numeric>HTML</Th><Th numeric>Resources found</Th><Th numeric>Requested</Th></tr>
+                </thead>
+                <tbody>
+                  {report.pages.map((page) => (
+                    <tr key={page.url}>
+                      <Td mono>{page.title ? `${page.title} · ` : ""}{page.url}</Td>
+                      <Td numeric>{page.status}</Td>
+                      <Td numeric>{formatBytes(page.bytes)}</Td>
+                      <Td numeric>{page.resourcesFound}</Td>
+                      <Td numeric>{page.resourcesRequested}</Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </TableShell>
+            </Panel>
+          ) : null}
 
           <Panel>
             <PanelHeader title="Lab vs field" description="Lighthouse/CrUX numbers appear only when PAGESPEED_API_KEY is configured. They are never invented from file sizes." />

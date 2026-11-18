@@ -81,20 +81,24 @@ export const limits = {
   artifactTtlHours: num(process.env.OW_ARTIFACT_TTL_HOURS, 720),
   /** MongoDB pool size. Keep small on serverless (1–3). */
   mongoPoolMax: num(process.env.OW_MONGO_POOL_MAX, 3),
-  /** Website audit: max HTML bytes. */
-  auditMaxHtmlBytes: num(process.env.OW_AUDIT_MAX_HTML_KB, 700) * 1024,
-  /** Website audit: max bytes per discovered resource. */
-  auditMaxResourceBytes: num(process.env.OW_AUDIT_MAX_RESOURCE_KB, 400) * 1024,
-  /** Website audit: max resources fetched after the document. */
-  auditMaxResources: Math.min(num(process.env.OW_AUDIT_MAX_RESOURCES, 16), 32),
+  /** Website audit: largest page document that is read. */
+  auditMaxHtmlBytes: Math.floor(capped(process.env.OW_AUDIT_MAX_HTML_MB, 1, 1) * MB),
+  /** Website audit: largest discovered resource that is read. */
+  auditMaxResourceBytes: Math.floor(capped(process.env.OW_AUDIT_MAX_RESOURCE_MB, 1, 1) * MB),
+  /** Website audit: resources fetched per page, after its document. */
+  auditMaxResources: Math.floor(capped(process.env.OW_AUDIT_MAX_RESOURCES, 25, 25)),
+  /** Website audit: pages per audit, the requested one included. Further pages are same-origin links found on it. */
+  auditMaxPages: Math.floor(capped(process.env.OW_AUDIT_MAX_PAGES, 3, 3)),
+  /** Website audit: bytes one audit may read from the network in total, over all pages and resources. */
+  auditMaxTotalBytes: Math.floor(capped(process.env.OW_AUDIT_MAX_TOTAL_MB, 24, 48) * MB),
+  /** Website audit: requests in flight at a time. */
+  auditConcurrency: 4,
   /** Website audit: per-request timeout. */
   auditTimeoutMs: Math.min(num(process.env.OW_AUDIT_TIMEOUT_MS, 4_000), 8_000),
-  /** Website audit: overall request budget, kept below a typical serverless execution ceiling. */
-  auditTotalTimeoutMs: Math.min(num(process.env.OW_AUDIT_TOTAL_TIMEOUT_MS, 45_000), 50_000),
+  /** Website audit: time budget of one whole audit. */
+  auditTotalTimeoutMs: Math.min(num(process.env.OW_AUDIT_TOTAL_TIMEOUT_MS, 45_000), 120_000),
   /** Website audit: maximum time reserved for optional PageSpeed Insights. */
   auditPageSpeedTimeoutMs: Math.min(num(process.env.OW_AUDIT_PAGESPEED_TIMEOUT_MS, 10_000), 12_000),
-  /** Optional extra same-origin pages (depth 1). */
-  auditMaxPages: Math.min(num(process.env.OW_AUDIT_MAX_PAGES, 1), 3),
 } as const;
 
 /**

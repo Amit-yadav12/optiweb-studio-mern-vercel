@@ -14,7 +14,7 @@ import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { FormatTag, Panel, TableShell, Td, Th } from "@/components/ui/Layout";
 import { StatusBadge } from "@/components/ui/Feedback";
 import { formatBytes, formatSavingsPercent } from "@/lib/format";
-const limits = { maxFilesPerRequest: 4, maxFileBytes: 1024 * 1024, artifactTtlHours: 720 };
+import { mbLabel, useServerLimits } from "@/lib/limits";
 
 export const metadata = {
   title: "OptiWeb Studio — Make every byte count",
@@ -36,6 +36,15 @@ const SAMPLE_TOTAL_OUTPUT = SAMPLE_ROWS.reduce((sum, row) => sum + row.output, 0
 const SAMPLE_SAVED = SAMPLE_TOTAL_INPUT - SAMPLE_TOTAL_OUTPUT;
 
 export default function LandingPage() {
+  // The numbers on this page are the server's. Until they arrive, "…" is shown instead of a guess.
+  const { limits: server, known } = useServerLimits();
+  const image = server.image;
+  const limits = {
+    files: known ? String(image?.maxFiles ?? server.maxFilesPerRequest) : "…",
+    fileMb: known ? mbLabel(image?.maxFileBytes ?? server.maxFileBytes) : "…",
+    cssChars: known && server.maxCssChars ? server.maxCssChars.toLocaleString("en-US") : null,
+    artifactDays: known ? String(Math.round((image?.artifactTtlHours ?? server.artifactTtlHours) / 24)) : "…",
+  };
   return (
     <div className="min-h-screen bg-canvas">
       <header className="sticky top-0 z-40 border-b border-line bg-canvas/90 backdrop-blur-sm">
@@ -85,7 +94,7 @@ export default function LandingPage() {
               <dl className="mt-9 grid max-w-lg grid-cols-3 gap-4 border-t border-line pt-5">
                 {[
                   { term: "Formats", detail: "WebP · AVIF · JPEG · PNG" },
-                  { term: "Batch limit", detail: `${limits.maxFilesPerRequest} files / request` },
+                  { term: "Batch limit", detail: `${limits.files} files / batch` },
                   { term: "CSS engine", detail: "PostCSS parse + patch" },
                 ].map((item) => (
                   <div key={item.term}>
@@ -227,7 +236,7 @@ export default function LandingPage() {
                 {
                   step: "01",
                   title: "Select",
-                  body: `Drop up to ${limits.maxFilesPerRequest} images or paste a stylesheet. Types are allowlisted and the real bytes are decoded before anything else happens.`,
+                  body: `Drop up to ${limits.files} images or paste a stylesheet. Types are allowlisted and the real bytes are decoded before anything else happens.`,
                 },
                 {
                   step: "02",
@@ -262,9 +271,9 @@ export default function LandingPage() {
               </div>
               <ul className="mt-5 flex flex-col gap-2.5 text-sm text-ink-soft">
                 {[
-                  `Up to ${Math.round(limits.maxFileBytes / (1024 * 1024))} MB per file and ${limits.maxFilesPerRequest} files per batch`,
+                  `Up to ${limits.fileMb} MB per file and ${limits.files} files per batch`,
                   "Quality range 30–100; dimensions capped at 8000px",
-                  "Stylesheets up to 400,000 characters",
+                  limits.cssChars ? `Stylesheets up to ${limits.cssChars} characters` : "Stylesheets up to the size the server allows",
                   "SVG is analysed but not rasterised — it is already vector",
                 ].map((item) => (
                   <li key={item} className="flex gap-2.5">
@@ -305,7 +314,7 @@ export default function LandingPage() {
                 <p className="mt-2 text-sm leading-relaxed text-muted">
                   Uploads are decoded in memory on the server and never executed. Results and metadata are
                   stored against an anonymous session cookie so you can revisit them during a working
-                  session; produced files are pruned after {limits.artifactTtlHours} hours. No accounts, no
+                  session; produced files are deleted after {limits.artifactDays} days. No accounts, no
                   third-party trackers, no analytics beyond the session summary you can see yourself.
                 </p>
               </div>

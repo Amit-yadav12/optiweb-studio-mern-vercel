@@ -50,13 +50,14 @@ Optional:
 
 - `PAGESPEED_API_KEY`: PageSpeed Insights measurements. Without a configured provider and returned data, the UI must not claim lab/field metrics.
 - `CLIENT_ORIGIN`: comma-separated additional allowed browser origins. Leave empty for the same-origin site and API deployment.
-- `OW_*`: documented limits in `.env.example`; adjust only after reviewing the Function runtime and all request/response overhead.
+- `BLOB_READ_WRITE_TOKEN`, `CRON_SECRET`: object storage and scheduled cleanup for direct uploads. See "Direct uploads and background jobs".
+- `OW_*`: documented in `.env.example`. `OW_MAX_*` is the capacity of direct uploads; `OW_REQUEST_*` are the limits of files sent inside a request, which have fixed ceilings because of the host's body limit.
 
 Use a restricted Atlas database user, rotate credentials if they were exposed, and configure Atlas network access to match the Netlify function's static egress or private connectivity. Do not use a permanent `0.0.0.0/0` Atlas allow rule. Verify region, plan support, and connectivity before testing writes.
 
 ## Netlify Function and resource limits
 
-Current Netlify Function documentation lists a 60-second synchronous execution limit and 6 MB buffered request/response payload ceiling. Binary uploads are Base64 encoded, reducing the effective binary request budget to roughly 4.5 MB. This project uses still lower application budgets: 4.1 MB raw Express request body, 3.8 MB aggregate file bodies, 1 MB per file, 3.5 MB per artifact, and 3.5 MB per ZIP. The difference reserves room for multipart boundaries and envelopes. The generated artifact cap is enforced before persistence.
+Current Netlify Function documentation lists a 60-second synchronous execution limit and 6 MB buffered request/response payload ceiling. Binary uploads are Base64 encoded, reducing the effective binary request budget to roughly 4.5 MB. For files sent inside a request, this project uses still lower application budgets: 4.1 MB raw Express request body, 3.8 MB aggregate file bodies, 1 MB per file, 3.5 MB per artifact, and 3.5 MB per ZIP. The difference reserves room for multipart boundaries and envelopes. The generated artifact cap is enforced before persistence.
 
 The function buffers multipart input and binary output through `serverless-http`; use the conservative limits for that transport. Large uploads require a separately authenticated object-storage transfer and worker design. They must not be implemented by raising limits blindly. Sharp decoded pixels, processing time, and concurrency are independently bounded.
 
@@ -136,6 +137,106 @@ An image job that was not stored still returns its converted files, inside the s
 
 One response carries at most 3 MB of output files, because Base64 adds a third and the whole response has to stay below Vercel's 4.5 MB limit. `OW_MAX_INLINE_MB` can lower the value but not raise it. Files are accepted in upload order while they fit. A file that does not fit has `inlineOutput: null` and `inlineSkipped: "too_large"`, and the results panel reports that it cannot be downloaded. A stored job never carries `inlineOutput`.
 
+## Direct uploads and background jobs
+
+A function request can carry at most 4.5 MB on Vercel, so a larger file cannot be sent to the API. With object storage connected, the browser uploads each file straight to a private Vercel Blob store and a background job converts it.
+
+```
+browser ── create job ───────────────▶ API ── job, files, quota ──▶ MongoDB
+browser ── ask for upload authorization ▶ API   (short-lived, one file, one size, one type)
+browser ══ file ════════════════════════════════════════════════▶ Vercel Blob (private)
+browser ── confirm ──────────────────▶ API ── looks the file up in storage, checks size and signature
+                                        API ── worker: read source, convert, write result ──▶ Vercel Blob
+browser ── poll job / download ──────▶ API ── streams the result from storage to its owner
+```
+
+MongoDB is the record of everything: jobs, files, results, quotas. Vercel Blob holds only bytes. Nothing in the store is public; a file is reachable only through the API, by the session that owns it.
+
+### Which mode is in effect
+
+`GET /api/v1/limits` reports `image.mode`:
+
+- `direct`: object storage is configured and the database answers. The limits below apply.
+- `request`: files travel inside the request, with the small limits of that path (1 MB per file, 4 files, 3.8 MB per batch by default). `image.directUnavailableReason` says what is missing: `storage_not_configured`, `database_not_configured`, `database_unavailable`, or `storage_unsupported_host`.
+
+The interface shows the limits of the mode in effect. It has no numbers of its own.
+
+### Set up on Vercel
+
+1. **Blob store.** Project → Storage → Create → Blob. Choose **Private** access (it cannot be changed later). Tick **Add a read-write token env var to this connection**: the token is what authorizes browser uploads. Vercel then adds `BLOB_READ_WRITE_TOKEN` to Production and Preview.
+2. **Database.** `MONGODB_URI` must work from Vercel. `/api/v1/health` shows `database.ready`, and names the cause when it is false (see "Storage diagnostics").
+3. **Cleanup secret.** Add `CRON_SECRET`: at least 16 letters and digits. `vercel.json` schedules `/api/v1/internal/cron` once a day, and Vercel sends the secret with the call. Without the secret the endpoint refuses every request and nothing is cleaned up by the application (the store still deletes files on its own, see "Retention").
+4. **Redeploy**, so that the deployment picks up the variables. Check `/api/v1/limits`: `image.mode` must be `direct`.
+
+`vercel.json` sets `maxDuration` to 300 seconds for the API function, which a Hobby project with Fluid compute allows. One worker run uses up to 240 seconds of it (`OW_WORKER_BUDGET_SECONDS`).
+
+### Limits
+
+| | Direct uploads | Inside a request |
+| --- | --- | --- |
+| File | 25 MB | 1 MB |
+| Files per job | 10 | 4 |
+| Job in total | 150 MB | 3.8 MB |
+| Decoded pixels per image | 40 MP | 24 MP |
+| Decoded pixels per job | 160 MP | – |
+| Generated file | 50 MB | 3.5 MB |
+| ZIP download | 250 MB, streamed | 3.5 MB |
+| AVIF output | 16 MP | 24 MP |
+
+The direct-upload values are ceilings as well as defaults: `OW_MAX_*` can lower them, a higher value is ignored. They were chosen from measurements (see `capacity-benchmark.md`), and larger sizes have not been load-tested on the deployed runtime. `OW_LARGE_CAPACITY_ENABLED` is read and reported in `/api/v1/limits`, but raises nothing in this release.
+
+Every limit is checked on the server, at each point where it can be violated: when the job is created (count, sizes, types, quota), when the upload is authorized (the token carries the size and type), when the upload is confirmed (real size, file signature), in the worker (decoded pixels from the header, before any pixel is decoded), and when a result is written or downloaded.
+
+AVIF has its own limit because of memory: a 40 MP AVIF encode needed about 1.4 GB and a minute on one core in testing, which does not fit a 2 GB function.
+
+### Quotas and cost controls
+
+- **Storage per session:** 500 MB (`OW_SESSION_STORAGE_QUOTA_MB`), counting source files, generated files and uploads in progress. A job that does not fit is refused before anything is uploaded (403 `quota_exceeded`).
+- **Jobs in progress per session:** 2 (`OW_MAX_ACTIVE_JOBS_PER_SESSION`), then 429 `too_many_active_jobs`.
+- **Whole application:** `OW_GLOBAL_STORAGE_BUDGET_MB` (2048) and `OW_GLOBAL_DAILY_UPLOAD_MB` (4096). When either is used up, new uploads get 503 `capacity_exhausted`. Set both to what your storage plan allows; the defaults are not a statement about any plan.
+- **Request rate:** job creation, upload authorization and confirmation are counted in the database, so the limit holds across function instances.
+
+All of these are enforced with single conditional writes, so requests that arrive together cannot both pass a limit. `GET /api/v1/usage` shows a session its own numbers. `GET /api/v1/internal/usage` (with `Authorization: Bearer $CRON_SECRET` or `$OW_ADMIN_TOKEN`) shows the application's: stored bytes against the budget, today's uploads, conversions, conversion seconds, downloads, failures and retries, with a warning flag at 80 % of a budget.
+
+### Retention
+
+| | Kept for | Variable |
+| --- | --- | --- |
+| Source uploads | 24 hours after the job finished | `OW_SOURCE_TTL_HOURS` |
+| Generated files | 30 days | `OW_ARTIFACT_TTL_HOURS` |
+| Job records (History) | 180 days | `OW_HISTORY_TTL_DAYS` |
+
+ZIP downloads are streamed and never stored, so they have no retention.
+
+MongoDB's TTL indexes delete records, not files. The scheduled cleanup deletes the files first, while the record that names their owner still exists, then marks the record. A job's record stays in History after its files are gone and says that they are no longer available. Each step can be repeated safely; a deletion that fails is tried again by the next run.
+
+As a second line, every object is written with a storage-side expiry (`ttlDays`) a little after the application's own deadline: 3 days for source uploads and 31 days for generated files with the default settings. If the cleanup never runs, the store still deletes the files.
+
+The same run also repairs what an interrupted request can leave: an upload that arrived but was never confirmed, a job whose uploads never finished (cancelled after two hours), a job whose worker died, and counters that drifted.
+
+### The worker
+
+A job is a record with a state and a lease. A worker run claims a job with one conditional write, extends the lease while it works, and processes one file at a time. If the function is killed, the lease lapses after 150 seconds and the next run takes the job over: finished files stay finished, and the file that was in progress is started again. Each attempt is counted before it starts, so a file that keeps killing the worker is given up on after three attempts. A file's output has a fixed path and a fixed ID, so processing it twice replaces the output instead of duplicating it.
+
+A worker run starts:
+
+- when the last upload of a job is confirmed, in the same invocation, after the response (`waitUntil`);
+- when anyone reads the status of a job that has no live worker;
+- from the daily scheduled call.
+
+So a job is never lost, and normally finishes in the invocation that accepted it. What depends on the plan is how soon an interrupted job resumes when nobody is looking at it: on Hobby the schedule runs once a day, on Pro it can run every minute (change the `crons` schedule in `vercel.json`).
+
+Vercel Workflows and Vercel Queues are not used. Workflows needs the Express server to be built with Nitro, which would replace this project's build; Queues is in beta. Either can replace the trigger later without changing the job records.
+
+### Operator endpoints
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v1/internal/cron` | Retention and repair. Returns what it did. |
+| `GET /api/v1/internal/usage` | Application-wide usage against the budgets. |
+
+Both need `Authorization: Bearer <secret>` and answer 401 without it, and 503 when no secret is configured.
+
 ## The API answers with a page instead of JSON
 
 The API answers every request under `/api`, including unknown routes and errors, with JSON. If the browser reports "The API is not available on this site (HTTP 404)", the request never reached the API: the host answered with its own "not found" page. The site is then running a deployment that has no server function. Reloading a page such as `/app/images` fails in the same way, because that deployment has no SPA fallback either.
@@ -153,6 +254,10 @@ To confirm, open `/api/v1/health` on the site. JSON means the API is deployed. A
 - `npm run test:storage:mongo`: needs a real MongoDB server. Checks stored bytes, downloads, rollback and rejected credentials against the database itself. It changes collection validators and drops its database, so it refuses to run unless the database name starts with `optiweb_ci_` or `optiweb_test_`. CI runs it against a throwaway container.
 - `npm run test:ui`: no browser needed. Renders the image results panel for each outcome and checks that download URLs and History links appear only for stored output, and that an unstored file is offered only as a copy held in the tab.
 - `npm run test:dom`: no browser and no database needed. Mounts the real Image Optimizer screen in jsdom and uses it against the API without a database: choose files, optimize, download each file and the ZIP from the tab. It also covers a host that serves the app without its API. jsdom does not lay out or paint, so this is not a visual test.
+- `npm run test:pipeline`: the direct-upload pipeline through the HTTP API, on the local storage driver: admission and every limit, upload authorization, confirmation, the worker (claims, retries, recovery after a crash, cancellation), quotas under simultaneous requests, ownership, retention and cleanup. With `MONGODB_URI` naming a database that starts with `optiweb_ci_` or `optiweb_test_` it runs against MongoDB and drops that database afterwards; without it, against an in-memory stand-in, which checks the application logic but not the queries. CI runs both.
+- `npm run test:dom:direct`: the Image Optimizer screen in direct-upload mode in jsdom, against the same API.
+- `npm run test:audit`: the website audit's page and resource limits against a made-up site, without network.
+- `npm run bench:capacity`: the capacity benchmark. Its numbers describe the machine it runs on.
 - `npm run smoke -- <base-url>`: checks a running site through public requests only. It uploads one small generated image and verifies the download, by URL when the result was stored or from the response when it was not. Add `--expect-build` after `npm run build` to verify that the site serves that build, and `--wait <seconds>` for a deployment that is still in progress.
 - `npm run test:function`: no-database adapter smoke tests; deliberately refuses to run if a database URI is present.
 - `npm test` / `npm run test:security`: run against a locally started API and an **isolated non-production test database**. These scripts create records and must never target production.
