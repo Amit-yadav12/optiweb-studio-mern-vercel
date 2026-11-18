@@ -20,11 +20,14 @@
  *  - Can an image be converted and the converted file downloaded: by URL when
  *    it was stored, or from the response when it was not?
  *  - When the site reports direct uploads: does a background job work end to
- *    end? The script creates a job, uploads one file straight to object
- *    storage with the authorization the site issues (Vercel Blob, or the
- *    local driver on a development server), confirms it, follows the job and
- *    downloads the result. This is the only check here that exercises the
- *    real storage service.
+ *    end? The script creates a job, uploads one file of about 6 MB straight
+ *    to object storage with the authorization the site issues (Vercel Blob,
+ *    or the local driver on a development server), confirms it, follows the
+ *    job and downloads the result. Both the upload and the download are
+ *    larger than the 4.5 MB a function request or a buffered response can
+ *    carry, so this passes only if the file bypasses the function on the way
+ *    in and is streamed on the way out. It is the only check here that
+ *    exercises the real storage service.
  *
  * It uploads small generated images and changes nothing else. Database
  * readiness is reported but does not fail the run, because conversion and
@@ -169,8 +172,10 @@ if (capacity?.mode === "direct") {
     cookie ||= (response.headers?.get("set-cookie") ?? "").split(";")[0];
     return response;
   };
-  const picture = await jpegImage(640, 400, { r: 200, g: 120, b: 40 });
-  const created = await api("POST", "/api/v1/jobs/image-optimization", { files: [{ name: "smoke-direct.jpg", type: "image/jpeg", size: picture.length }], settings: { format: "webp" } });
+  // Noise does not compress, so this PNG, and the PNG made from it, are both above 4.5 MB.
+  const picture = await sharp({ create: { width: 1450, height: 1450, channels: 3, noise: { type: "gaussian", mean: 128, sigma: 70 } } }).png({ compressionLevel: 1 }).toBuffer();
+  const FUNCTION_BODY_LIMIT = 4.5 * 1024 * 1024;
+  const created = await api("POST", "/api/v1/jobs/image-optimization", { files: [{ name: "smoke-direct.png", type: "image/png", size: picture.length }], settings: { format: "png" } });
   const item = created.json?.data?.job?.items?.[0];
   check("a job is created for one file", created.status === 201 && typeof item?.id === "string", `${seen(created)}${created.json?.error?.code ? `, ${created.json.error.code}` : ""}`);
 
@@ -198,11 +203,12 @@ if (capacity?.mode === "direct") {
     job = (await api("GET", `/api/v1/jobs/${job.id}`)).json?.data?.job ?? job;
   }
   const converted = job?.items?.[0];
-  check("the worker converts the file", job?.state === "completed" && converted?.state === "completed" && converted.result?.outputFormat === "webp", `job ${job?.state ?? "missing"}${converted?.errorCode ? `, ${converted.errorCode}` : ""}`);
+  check("the worker converts the file", job?.state === "completed" && converted?.state === "completed" && converted.result?.outputFormat === "png", `job ${job?.state ?? "missing"}${converted?.errorCode ? `, ${converted.errorCode}` : ""}`);
 
   const fetched = converted?.artifactId ? await request(`/api/v1/artifacts/${converted.artifactId}?download=1`, { headers: { cookie } }) : null;
   const picked = fetched?.status === 200 ? await sharp(fetched.bytes).metadata().catch(() => null) : null;
-  check("the result is streamed back to the session that owns it", fetched?.status === 200 && fetched.bytes.length === converted.result.outputBytes && picked?.format === "webp" && picked.width === 640, fetched ? `${seen(fetched)}, ${fetched.bytes.length} bytes` : "no artifact");
+  check("the result is streamed back to the session that owns it, complete", fetched?.status === 200 && fetched.bytes.length === converted.result.outputBytes && picked?.format === "png" && picked.width === 1450, fetched ? `${seen(fetched)}, ${fetched.bytes.length} bytes` : "no artifact");
+  check("the upload and the download were both larger than a function request or a buffered response may be", picture.length > FUNCTION_BODY_LIMIT && (fetched?.bytes.length ?? 0) > FUNCTION_BODY_LIMIT, `${picture.length} bytes up, ${fetched?.bytes.length ?? 0} bytes down`);
   const stranger = converted?.artifactId ? await request(`/api/v1/artifacts/${converted.artifactId}?download=1`) : null;
   check("a request without that session does not get the file", stranger?.status === 404, stranger ? seen(stranger) : "no artifact");
   if (job?.state === "completed") note(`direct upload via ${grant?.transport}: ${picture.length} → ${converted.result.outputBytes} bytes in a background job`);
