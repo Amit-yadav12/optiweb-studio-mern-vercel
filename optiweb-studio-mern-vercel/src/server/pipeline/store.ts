@@ -308,6 +308,8 @@ export const COLLECTIONS = {
 
 let override: PipelineStore | null = null;
 let indexesReady: Promise<void> | null = null;
+/** The collections of the current connection. Rebuilt when the connection is replaced. */
+let connected: { db: unknown; store: PipelineStore } | null = null;
 
 /** Test hook: use these collections instead of MongoDB. `null` restores MongoDB. */
 export function setPipelineStoreForTests(store: PipelineStore | null): void {
@@ -329,6 +331,10 @@ export async function pipelineStore(): Promise<PipelineStore> {
   const client = await connectMongo();
   const db = client.connection.db;
   if (!db) throw new Error("MongoDB connection has no database handle.");
+  if (connected?.db === db) {
+    await indexesReady;
+    return connected.store;
+  }
   const raw = {
     jobs: db.collection(COLLECTIONS.jobs),
     items: db.collection(COLLECTIONS.items),
@@ -362,7 +368,7 @@ export async function pipelineStore(): Promise<PipelineStore> {
     console.error(`[pipeline] index creation failed (${error instanceof Error ? error.name : "unknown error"})`);
   });
   await indexesReady;
-  return {
+  const store: PipelineStore = {
     jobs: mongoCollection<JobRecord>("jobs", raw.jobs),
     items: mongoCollection<ItemRecord>("items", raw.items),
     artifacts: mongoCollection<ArtifactRecord>("artifacts", raw.artifacts),
@@ -371,4 +377,6 @@ export async function pipelineStore(): Promise<PipelineStore> {
     rate: mongoCollection<RateRecord>("rate", raw.rate),
     slots: mongoCollection<SlotRecord>("slots", raw.slots),
   };
+  connected = { db, store };
+  return store;
 }

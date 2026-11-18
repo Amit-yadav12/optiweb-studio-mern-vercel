@@ -10,7 +10,7 @@ import { artifactUrl } from "@/lib/api-client";
 import { formatBytes, formatDimensions, formatDuration, formatSavingsPercent } from "@/lib/format";
 import type { ImageOptimizeResponse, ImageResult } from "@/types/domain";
 
-export type ItemStatus = "ready" | "processing" | "completed" | "failed";
+export type ItemStatus = "ready" | "uploading" | "processing" | "completed" | "failed";
 
 /** One queued upload and, once processed, its result. */
 export type OptimizerItem = {

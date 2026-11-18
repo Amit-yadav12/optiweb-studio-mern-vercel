@@ -9,7 +9,7 @@ import { Panel, PanelHeader, StatStrip } from "@/components/ui/Layout";
 import { FileDropzone } from "@/components/ui/FileDropzone";
 import { api } from "@/lib/api-client";
 import { formatBytes, formatDimensions } from "@/lib/format";
-import { stageFileForOptimizer } from "@/features/assets/transfer";
+import { stageFilesForOptimizer } from "@/features/assets/transfer";
 import type { AssetAnalysisResponse, AssetFinding, Preferences } from "@/types/domain";
 
 const FINDING_LABEL: Record<AssetFinding["code"], string> = {
@@ -23,7 +23,7 @@ const FINDING_LABEL: Record<AssetFinding["code"], string> = {
   "no-findings": "Baseline",
 };
 
-export function AssetAnalyzer({ defaults }: { defaults: { thresholdKb: number; maxFileMb: number; maxFiles: number } }) {
+export function AssetAnalyzer({ defaults }: { defaults: { thresholdKb: number; maxFileMb: number; maxFiles: number; maxBatchMb?: number } }) {
   const { push } = useToast();
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
@@ -99,11 +99,43 @@ export function AssetAnalyzer({ defaults }: { defaults: { thresholdKb: number; m
     }
   };
 
-  const sendToOptimizer = (file: File | undefined) => {
-    if (!file) return;
-    stageFileForOptimizer(file);
+  const sendToOptimizer = (files: Array<File | undefined>) => {
+    const present = files.filter((file): file is File => file !== undefined);
+    if (present.length === 0) return;
+    stageFilesForOptimizer(present);
     navigate("/app/images");
   };
+
+  /** Applies the limits of one analysis request before anything is sent, and says what was left out and why. */
+  const accept = (files: File[]): File[] => {
+    const fileLimit = defaults.maxFileMb * 1024 * 1024;
+    const batchLimit = defaults.maxBatchMb ? defaults.maxBatchMb * 1024 * 1024 : Number.POSITIVE_INFINITY;
+    const kept: File[] = [];
+    const reasons = { size: 0, count: 0, batch: 0 };
+    let total = 0;
+    for (const file of files) {
+      if (file.size > fileLimit) reasons.size += 1;
+      else if (kept.length >= defaults.maxFiles) reasons.count += 1;
+      else if (total + file.size > batchLimit) reasons.batch += 1;
+      else {
+        kept.push(file);
+        total += file.size;
+      }
+    }
+    const parts = [
+      reasons.size > 0 ? `${reasons.size} over ${defaults.maxFileMb} MB` : null,
+      reasons.count > 0 ? `${reasons.count} beyond the ${defaults.maxFiles}-file limit` : null,
+      reasons.batch > 0 ? `${reasons.batch} beyond ${defaults.maxBatchMb} MB in total` : null,
+    ].filter(Boolean);
+    if (parts.length > 0) push({ tone: "warn", title: `${files.length - kept.length} file${files.length - kept.length === 1 ? "" : "s"} not analyzed`, description: `Left out: ${parts.join(", ")}.` });
+    return kept;
+  };
+
+  /** Raster images of the last analysis that the Image Optimizer can take. */
+  const optimizable = (result?.files ?? [])
+    .filter((file) => file.kind === "image" && file.format !== "svg" && !file.error)
+    .map((file) => queue.find((entry) => entry.name === file.filename))
+    .filter((file): file is File => file !== undefined);
 
   const totalFindings = result?.summary.findings ?? 0;
 
@@ -121,13 +153,14 @@ export function AssetAnalyzer({ defaults }: { defaults: { thresholdKb: number; m
           multiple
           disabled={busy}
           onFiles={(files) => {
-            setQueue(files);
-            void analyze(files);
+            const accepted = accept(files);
+            setQueue(accepted);
+            void analyze(accepted);
           }}
           icon={<ScanSearch className="size-4.5" aria-hidden />}
           title="Drop images or a stylesheet"
           description="Findings are based on the file itself — not on how your page uses it."
-          constraints={`Images and .css · ${defaults.maxFileMb} MB per file · ${defaults.maxFiles} files per batch`}
+          constraints={`Images and .css · ${defaults.maxFileMb} MB per file · ${defaults.maxFiles} files per batch${defaults.maxBatchMb ? ` · ${defaults.maxBatchMb} MB in total` : ""}`}
         />
         {busy ? (
           <div className="mt-4">
@@ -170,6 +203,15 @@ export function AssetAnalyzer({ defaults }: { defaults: { thresholdKb: number; m
             The findings below are complete. This run is not in History, so it cannot be opened again later.
           </StorageNotice>
 
+          {optimizable.length > 1 ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <Button variant="primary" onClick={() => sendToOptimizer(optimizable)} leading={<Wand2 className="size-3.5" aria-hidden />}>
+                Optimize all {optimizable.length} images
+              </Button>
+              <p className="text-xs text-muted">Opens the Image Optimizer with these files already in its queue. Nothing is uploaded again until you start it.</p>
+            </div>
+          ) : null}
+
           <Panel as="aside">
             <div className="flex gap-3.5">
               <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-md border border-warn-border bg-warn-soft text-warn">
@@ -205,8 +247,7 @@ export function AssetAnalyzer({ defaults }: { defaults: { thresholdKb: number; m
                       variant="secondary"
                       size="sm"
                       onClick={() => {
-                        const staged = queue.find((entry) => entry.name === file.filename);
-                        sendToOptimizer(staged);
+                        sendToOptimizer([queue.find((entry) => entry.name === file.filename)]);
                       }}
                       leading={<Wand2 className="size-3.5" aria-hidden />}
                     >

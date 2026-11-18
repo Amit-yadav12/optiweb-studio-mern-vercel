@@ -1,6 +1,6 @@
 import { Link, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { Gauge, Globe, History, ImageDown, Menu, ScanSearch, Settings2, Type, X } from "lucide-react";
+import { Gauge, Globe, History, ImageDown, Menu, ScanSearch, Settings2, Type, X, HardDrive } from "lucide-react";
 import { ProductMark } from "@/components/brand/ProductMark";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { api } from "@/lib/api-client";
@@ -26,6 +26,7 @@ const NAV_GROUPS: Array<{
     label: "Records",
     items: [
       { href: "/app/history", label: "History", icon: History, hint: "Previous jobs in this session" },
+      { href: "/app/usage", label: "Storage", icon: HardDrive, hint: "Quota, stored files and retention" },
       { href: "/app/settings", label: "Settings", icon: Settings2, hint: "Defaults and data retention" },
     ],
   },

@@ -1,6 +1,6 @@
 import { crc32 } from "node:zlib";
 import { badRequest, payloadTooLarge } from "../../../http/errors.js";
-import { binaryOk, contentDisposition, parseJson, route, streamOk } from "../../../http/handler.js";
+import { binaryOk, contentDisposition, parseJson, route, streamOk, type RouteContext } from "../../../http/handler.js";
 import { objectArtifacts, recordDownload } from "../../../pipeline/views.js";
 import { zipLength, zipStream, type ZipEntry } from "../../../pipeline/zipStream.js";
 import { getArtifactsByIds } from "../../../services/storageService.js";
@@ -22,6 +22,21 @@ function bufferEntry(name: string, data: Buffer, modified: Date): ZipEntry {
 /** POST /api/v1/artifacts/zip — bundles results that belong to this session. */
 export const POST = route(async (req, ctx) => {
   const { ids, name } = await parseJson(req, artifactZipSchema);
+  return bundle(ctx, ids, name);
+}, { bucket: "artifacts" });
+
+/**
+ * GET /api/v1/artifacts/zip?ids=a,b,c — the same bundle as a plain link, so
+ * that the browser's own download writes a large archive to disk as it
+ * arrives. The request only reads, and only this session's files.
+ */
+export const GET = route(async (req, ctx) => {
+  const params = new URL(req.url).searchParams;
+  const { ids, name } = artifactZipSchema.parse({ ids: (params.get("ids") ?? "").split(",").filter(Boolean), name: params.get("name") ?? undefined });
+  return bundle(ctx, ids, name);
+}, { bucket: "artifacts" });
+
+async function bundle(ctx: RouteContext, ids: string[], name: string | undefined): Promise<Response> {
   const downloadName = (name?.trim() || "optiweb-results").replace(/[^\w.-]+/g, "-").slice(0, 60);
 
   // Files kept in object storage are bundled as a stream: each one is copied
@@ -122,4 +137,4 @@ export const POST = route(async (req, ctx) => {
     filename: `${downloadName}.zip`,
     headers: { "content-length": String(buffer.byteLength) },
   });
-}, { bucket: "artifacts" });
+}

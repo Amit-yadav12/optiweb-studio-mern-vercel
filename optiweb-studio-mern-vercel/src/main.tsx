@@ -13,6 +13,7 @@ import {
   NotFoundPage,
   OverviewPage,
   SettingsPage,
+  UsagePage,
 } from "@/pages/WorkspacePages";
 import "@/styles.css";
 
@@ -26,6 +27,7 @@ function App() {
     <Route path="/app/audit" element={<AuditPage />} />
     <Route path="/app/history" element={<HistoryPage />} />
     <Route path="/app/history/:id" element={<HistoryDetailPage />} />
+    <Route path="/app/usage" element={<UsagePage />} />
     <Route path="/app/settings" element={<SettingsPage />} />
     <Route path="/404" element={<NotFoundPage />} />
     <Route path="*" element={<Navigate to="/404" replace />} />

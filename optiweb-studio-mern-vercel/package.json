@@ -24,6 +24,7 @@
     "test:ui": "node --import tsx scripts/ui-outcome-selftest.mjs",
     "test:dom": "node --import tsx scripts/optimizer-dom-selftest.mjs",
     "test:pipeline": "node --import tsx scripts/pipeline-selftest.mjs",
+    "test:dom:direct": "node --import tsx scripts/optimizer-direct-dom-selftest.mjs",
     "test:a11y": "node scripts/a11y-audit.mjs",
     "smoke": "node scripts/deployed-smoke.mjs"
   },

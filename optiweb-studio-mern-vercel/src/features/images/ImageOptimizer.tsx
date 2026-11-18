@@ -6,13 +6,15 @@ import { Field, Input, SegmentedControl } from "@/components/ui/Form";
 import { FormatTag, Panel, PanelHeader } from "@/components/ui/Layout";
 import { FileDropzone } from "@/components/ui/FileDropzone";
 import { FileRow } from "@/components/ui/FileRow";
+import { DirectJobRunner, isTerminal, responseFromJob, type DirectFile, type DirectRunState, type JobApi } from "@/features/images/directJob";
+import { uploadToStorage, type UploadFn } from "@/features/images/directUpload";
 import { ImageReview, type ItemStatus, type OptimizerItem } from "@/features/images/ImageReview";
 import { createLocalOutput, releaseLocalOutput, zipLocalOutputs, type LocalOutput } from "@/features/images/localOutput";
 import { describeImageOutcome, inlineOutputOf, settleResult } from "@/features/images/outcome";
-import { takeStagedFile } from "@/features/assets/transfer";
+import { takeStagedFiles } from "@/features/assets/transfer";
 import { ApiClientError, api, artifactUrl, downloadZip, triggerDownload } from "@/lib/api-client";
 import { clamp, formatBytes, formatDuration } from "@/lib/format";
-import type { ImageOptimizeResponse, Preferences } from "@/types/domain";
+import type { ImageOptimizeResponse, ImageOptimizeSettings, Preferences } from "@/types/domain";
 
 type Item = OptimizerItem;
 
@@ -27,7 +29,66 @@ export type OptimizerLimits = {
   maxFiles: number;
   maxDecodedPixels: number;
   avifSupported: boolean;
+  /**
+   * How files reach the server. `direct`: the browser uploads to object
+   * storage and a background job converts the files. `request` (the default):
+   * files are sent inside one request and converted before it answers.
+   */
+  mode?: "direct" | "request";
+  /** Combined size of the files of one batch, in MB. */
+  maxBatchMb?: number;
+  /** Hours a source upload is kept after its job, and a converted file after it was made. Direct mode only. */
+  sourceTtlHours?: number | null;
+  artifactTtlHours?: number;
 };
+
+/** The network collaborators of a background job. Replaced in tests. */
+export type OptimizerTransport = { api: JobApi; upload: UploadFn };
+
+const defaultTransport: OptimizerTransport = {
+  api: { post: (path, body) => api.post(path, body), get: (path) => api.get(path), del: (path) => api.del(path) },
+  upload: uploadToStorage,
+};
+
+/** What one file of a background job is doing, in words, from the transfer's and the job's own data. */
+function directDetail(file: DirectFile): string {
+  switch (file.phase) {
+    case "pending":
+      return "waiting to upload";
+    case "uploading":
+      return `uploading · ${formatBytes(file.loaded)} of ${formatBytes(file.total)} sent`;
+    case "upload_failed":
+      return "upload failed";
+    case "queued":
+      return "uploaded · waiting for the worker";
+    case "processing":
+      return "converting";
+    case "completed":
+      return "converted";
+    case "failed":
+      return "not converted";
+    case "cancelled":
+      return "cancelled";
+  }
+}
+
+/** One line for the whole job, built from real counts only. */
+function directSummary(state: DirectRunState): string {
+  const total = state.files.length;
+  if (state.cancelling) return "Cancelling…";
+  if (state.phase === "creating") return "Creating the job…";
+  if (state.phase === "uploading") {
+    const sent = state.files.reduce((sum, file) => sum + (file.phase === "uploading" || file.phase === "pending" || file.phase === "upload_failed" ? file.loaded : file.total), 0);
+    const all = state.files.reduce((sum, file) => sum + file.total, 0);
+    const done = state.files.filter((file) => file.phase !== "pending" && file.phase !== "uploading" && file.phase !== "upload_failed").length;
+    return `Uploading: ${done} of ${total} file${total === 1 ? "" : "s"} uploaded · ${formatBytes(sent)} of ${formatBytes(all)} sent`;
+  }
+  const counts = state.job?.counts;
+  if (!counts) return "Waiting for the server…";
+  const finished = counts.completed + counts.failed + counts.cancelled;
+  if (state.job?.state === "queued" || state.job?.state === "uploaded") return `Waiting in the queue · ${finished} of ${counts.total} file${counts.total === 1 ? "" : "s"} finished`;
+  return `Converting · ${finished} of ${counts.total} file${counts.total === 1 ? "" : "s"} finished`;
+}
 
 const FORMATS = [
   { value: "webp", label: "WebP" },
@@ -37,8 +98,12 @@ const FORMATS = [
   { value: "original", label: "Keep" },
 ] as const;
 
-export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
+export function ImageOptimizer({ limits, transport = defaultTransport, onJobSettled }: { limits: OptimizerLimits; transport?: OptimizerTransport; onJobSettled?: () => void }) {
   const { push } = useToast();
+  const directMode = limits.mode === "direct";
+  const [direct, setDirect] = useState<DirectRunState | null>(null);
+  const runnerRef = useRef<DirectJobRunner | null>(null);
+  const directStartedRef = useRef(0);
   const [items, setItems] = useState<Item[]>([]);
   const [format, setFormat] = useState<(typeof FORMATS)[number]["value"]>("webp");
   const [policy, setPolicy] = useState<"single" | "best-effort" | "no-regression">("single");
@@ -58,6 +123,8 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
+      // The job itself is not touched: it keeps running on the server and appears in History.
+      runnerRef.current?.dispose();
       for (const item of itemsRef.current) releaseItem(item);
     };
   }, []);
@@ -78,10 +145,10 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
       });
   }, [limits.avifSupported]);
 
-  /* A file staged by the Asset Analyzer lands here without a re-upload. */
+  /* Files staged by the Asset Analyzer land here without being selected again. */
   useEffect(() => {
-    const staged = takeStagedFile();
-    if (staged) addItem([staged]);
+    const staged = takeStagedFiles();
+    if (staged.length > 0) addItem(staged);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -134,7 +201,26 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
         const accepted = files.slice(0, room);
         const rejected = files.slice(room);
         const tooBig = accepted.filter((file) => file.size > limits.maxFileMb * 1024 * 1024);
-        const allowed = accepted.filter((file) => file.size <= limits.maxFileMb * 1024 * 1024);
+        const fitting = accepted.filter((file) => file.size <= limits.maxFileMb * 1024 * 1024);
+        // The batch as a whole has a size limit too. Files are taken in order while they fit.
+        const batchLimit = limits.maxBatchMb ? limits.maxBatchMb * 1024 * 1024 : Number.POSITIVE_INFINITY;
+        let batchBytes = current.reduce((sum, item) => sum + item.file.size, 0);
+        const allowed: File[] = [];
+        const overBatch: File[] = [];
+        for (const file of fitting) {
+          if (batchBytes + file.size > batchLimit) overBatch.push(file);
+          else {
+            allowed.push(file);
+            batchBytes += file.size;
+          }
+        }
+        if (overBatch.length > 0) {
+          push({
+            tone: "warn",
+            title: `${overBatch.length} file${overBatch.length === 1 ? "" : "s"} not added`,
+            description: `A batch holds at most ${limits.maxBatchMb} MB in total.`,
+          });
+        }
 
         if (rejected.length > 0) {
           push({
@@ -161,7 +247,7 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
         ];
       });
     },
-    [limits.maxFileMb, limits.maxFiles, push],
+    [limits.maxBatchMb, limits.maxFileMb, limits.maxFiles, push],
   );
 
   const removeItem = (key: string) => {
@@ -177,6 +263,8 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
     setItems([]);
     setResponse(null);
     setFailure(null);
+    runnerRef.current?.reset();
+    setDirect(null);
   };
 
   const pending = items.filter((item) => item.status === "ready" || item.status === "failed");
@@ -187,7 +275,72 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
     return Math.round(clamp(parsed, 16, 8000));
   };
 
+  /** What a background job reports is mirrored into the queue, file by file. */
+  const applyDirectState = (state: DirectRunState) => {
+    setDirect(state);
+    const byKey = new Map(state.files.map((file) => [file.key, file]));
+    const statusOf = (file: DirectFile): ItemStatus =>
+      file.phase === "pending" || file.phase === "uploading" ? "uploading" : file.phase === "queued" || file.phase === "processing" ? "processing" : file.phase === "upload_failed" ? "failed" : "processing";
+
+    if (state.phase === "finished" && state.job && isTerminal(state.job)) {
+      const job = state.job;
+      const data = responseFromJob(job);
+      const elapsed = performance.now() - directStartedRef.current;
+      // Results are matched to queue entries by the upload ID each entry was given.
+      const resultByKey = new Map<string, Partial<Item>>();
+      for (const file of state.files) {
+        const item = job.items.find((candidate) => candidate.id === file.uploadId);
+        const result = item ? data.results.find((candidate) => candidate.id === (item.artifactId ?? item.id)) : undefined;
+        if (result) resultByKey.set(file.key, { ...settleResult(data, result), localOutput: null });
+        // A cancelled file was not processed: it goes back to the queue as it was.
+        else resultByKey.set(file.key, { status: "ready", error: undefined });
+      }
+      setItems((current) => current.map((item) => (resultByKey.has(item.key) ? { ...item, ...resultByKey.get(item.key) } : item)));
+      setBusy(false);
+      onJobSettled?.();
+      if (data.results.length > 0) {
+        setResponse(data);
+        const outcome = describeImageOutcome(data);
+        push({ tone: outcome.toast.tone, title: outcome.toast.title, description: outcome.toast.description ?? `${formatBytes(data.totals.savedBytes)} saved · finished in ${formatDuration(elapsed)}` });
+      } else {
+        push({ tone: "neutral", title: "Job cancelled", description: "No file was converted. Your queue is unchanged." });
+      }
+      return;
+    }
+    if (state.phase === "error") {
+      setItems((current) => current.map((item) => (byKey.has(item.key) ? { ...item, status: "ready", error: undefined } : item)));
+      setFailure(state.error ?? { message: "The job could not be completed." });
+      setBusy(false);
+      onJobSettled?.();
+      return;
+    }
+    setItems((current) =>
+      current.map((item) => {
+        const file = byKey.get(item.key);
+        return file ? { ...item, status: statusOf(file), error: file.phase === "upload_failed" ? file.error ?? "The upload failed." : undefined } : item;
+      }),
+    );
+  };
+
+  /** Direct mode: the files go straight to object storage and a background job converts them. */
+  const runDirect = async () => {
+    if (pending.length === 0 || busy) return;
+    setBusy(true);
+    setFailure(null);
+    setResponse(null);
+    const width = parseDimension(maxWidth);
+    const height = parseDimension(maxHeight);
+    const settings: ImageOptimizeSettings = { format, quality, policy, maxWidth: width, maxHeight: height };
+    const entries = pending.map((item) => ({ key: item.key, file: item.file }));
+    directStartedRef.current = performance.now();
+    runnerRef.current?.dispose();
+    const runner = new DirectJobRunner({ api: transport.api, upload: transport.upload, onChange: applyDirectState });
+    runnerRef.current = runner;
+    await runner.start(entries, settings);
+  };
+
   const run = async () => {
+    if (directMode) return runDirect();
     if (pending.length === 0 || busy) return;
     setBusy(true);
     setFailure(null);
@@ -282,7 +435,23 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
   };
 
   const cancel = () => {
+    if (directMode) {
+      void runnerRef.current?.cancel();
+      return;
+    }
     abortRef.current?.abort();
+  };
+
+  const directFiles = useMemo(() => new Map((direct?.files ?? []).map((file) => [file.key, file])), [direct]);
+  const stalledCount = direct?.files.filter((file) => file.phase === "upload_failed").length ?? 0;
+  /** Files of the finished job whose failure was temporary, so that running them again can help. */
+  const retryableCount = directMode && direct?.phase === "finished" ? (direct.job?.items.filter((item) => item.retryable).length ?? 0) : 0;
+  const retryFailed = () => {
+    setBusy(true);
+    setFailure(null);
+    setResponse(null);
+    directStartedRef.current = performance.now();
+    void runnerRef.current?.retryFailed();
   };
 
   const completed = useMemo(() => items.filter((item) => item.status === "completed" && item.result), [items]);
@@ -292,6 +461,13 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
   /** `ids` are stored output files only; the review panel never passes anything else. */
   const downloadAll = async (ids: string[]) => {
     if (ids.length === 0) return;
+    if (directMode) {
+      // Large bundles are handed to the browser's own download, which writes
+      // to disk as the bytes arrive instead of holding the archive in memory.
+      triggerDownload(`/api/v1/artifacts/zip?ids=${ids.join(",")}&name=optiweb-images`, "optiweb-images.zip");
+      push({ tone: "ok", title: "Download started", description: `${ids.length} optimized file${ids.length === 1 ? "" : "s"} in one ZIP.` });
+      return;
+    }
     setZipping(true);
     try {
       await downloadZip(ids, "optiweb-images");
@@ -326,7 +502,11 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
         <PanelHeader
           id="select-panel"
           title="1 · Select images"
-          description="Files are decoded on the server before any conversion, so an unreadable upload is rejected immediately."
+          description={
+            directMode
+              ? "Files are uploaded straight to private storage and converted by a background job. Each file is checked on arrival and decoded before any conversion."
+              : "Files are decoded on the server before any conversion, so an unreadable upload is rejected immediately."
+          }
           meta={<FormatTag>max {limits.maxFiles} files</FormatTag>}
         />
         <FileDropzone
@@ -337,7 +517,7 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
           selectedCount={items.length}
           title="Drop images here"
           description="JPEG, PNG, WebP, AVIF, GIF or TIFF. Vector SVG is analysed, not rasterised."
-          constraints={`${limits.maxFileMb} MB per file · ${limits.maxFiles} files per batch · ${(limits.maxDecodedPixels / 1_000_000).toFixed(0)} MP decoded-pixel cap · aspect ratio always preserved`}
+          constraints={`${limits.maxFileMb} MB per file · ${limits.maxFiles} files per batch${limits.maxBatchMb ? ` · ${limits.maxBatchMb} MB per batch` : ""} · ${(limits.maxDecodedPixels / 1_000_000).toFixed(0)} MP decoded-pixel cap · aspect ratio always preserved`}
         />
         {items.length > 0 ? (
           <div className="mt-4 overflow-hidden rounded-md border border-line">
@@ -348,7 +528,7 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
                   name={item.file.name}
                   status={item.status}
                   thumbnail={item.preview}
-                  detail={`${formatBytes(item.file.size)} · ${(item.file.type || "unknown type").replace("image/", "")}`}
+                  detail={`${formatBytes(item.file.size)} · ${(item.file.type || "unknown type").replace("image/", "")}${busy && directFiles.has(item.key) ? ` · ${directDetail(directFiles.get(item.key)!)}` : ""}`}
                   saved={
                     item.result?.status === "completed"
                       ? { bytes: item.result.savedBytes, percent: item.result.savingsPercent }
@@ -359,6 +539,10 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
                 />
               ))}
             </ul>
+            <p className="border-t border-line bg-surface-sunken/50 px-3 py-2 font-mono text-2xs text-muted" data-testid="batch-total">
+              {items.length} file{items.length === 1 ? "" : "s"} · {formatBytes(items.reduce((sum, item) => sum + item.file.size, 0))}
+              {limits.maxBatchMb ? ` of ${limits.maxBatchMb} MB per batch` : ""}
+            </p>
           </div>
         ) : null}
       </Panel>
@@ -466,11 +650,36 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
                 Cancel
               </Button>
               <div className="min-w-[180px] flex-1">
-                <ProgressIndicator label={`Encoding ${pending.length} file${pending.length === 1 ? "" : "s"} on the server…`} />
+                <ProgressIndicator label={directMode && direct ? directSummary(direct) : `Encoding ${pending.length} file${pending.length === 1 ? "" : "s"} on the server…`} />
               </div>
             </>
           ) : null}
+          {retryableCount > 0 && !busy ? (
+            <Button variant="secondary" size="lg" onClick={retryFailed}>
+              Retry {retryableCount} failed file{retryableCount === 1 ? "" : "s"}
+            </Button>
+          ) : null}
         </div>
+
+        {directMode && direct?.phase === "upload_stalled" ? (
+          <div className="mt-4">
+            <ErrorState
+              title="Some uploads did not finish"
+              message={`${stalledCount} file${stalledCount === 1 ? "" : "s"} could not be uploaded. The other files are safe in storage.`}
+              hint="Check your connection and retry, or continue with the files that arrived."
+              action={
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="secondary" size="sm" onClick={() => void runnerRef.current?.retryUploads()}>
+                    Retry uploads
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => void runnerRef.current?.skipFailedUploads()}>
+                    Continue without them
+                  </Button>
+                </div>
+              }
+            />
+          </div>
+        ) : null}
 
         {failure ? (
           <div className="mt-4">
@@ -501,14 +710,26 @@ export function ImageOptimizer({ limits }: { limits: OptimizerLimits }) {
             </span>
             <div className="min-w-0">
               <h2 className="text-sm font-semibold text-ink">What happens to your files</h2>
-              <p className="mt-1.5 max-w-3xl text-xs leading-relaxed text-muted">
-                Uploads are decoded in memory, re-encoded with sharp, and stored as an artifact tied to this
-                browser session so you can download them again. Artifacts expire after the configured retention period (30 days by default). Conversion
-                happens on the server; if the output is larger than the source, the result is reported as a
-                negative saving rather than discarded. If the output cannot be stored, the results say so and
-                the converted files are sent back with the results instead: you can save them from this tab,
-                but they are not kept on the server and do not appear in History.
-              </p>
+              {directMode ? (
+                <p className="mt-1.5 max-w-3xl text-xs leading-relaxed text-muted">
+                  Your browser uploads each file straight to private storage; it is not sent through the
+                  application server. A background job then converts the files one at a time, and the page
+                  shows how many are done. The job keeps running if you close this tab, and its results
+                  appear in History. Only this browser session can download them. Source files are deleted{" "}
+                  {limits.sourceTtlHours ?? 24} hours after the job, converted files after{" "}
+                  {Math.round((limits.artifactTtlHours ?? 720) / 24)} days. If an output is larger than its
+                  source, the result is reported as a negative saving rather than discarded.
+                </p>
+              ) : (
+                <p className="mt-1.5 max-w-3xl text-xs leading-relaxed text-muted">
+                  Uploads are decoded in memory, re-encoded with sharp, and stored as an artifact tied to this
+                  browser session so you can download them again. Artifacts expire after the configured retention period (30 days by default). Conversion
+                  happens on the server; if the output is larger than the source, the result is reported as a
+                  negative saving rather than discarded. If the output cannot be stored, the results say so and
+                  the converted files are sent back with the results instead: you can save them from this tab,
+                  but they are not kept on the server and do not appear in History.
+                </p>
+              )}
               <ButtonLink href="/app/assets" variant="ghost" size="sm" className="mt-2 px-0">
                 Not sure which file to optimize? Analyze it first
               </ButtonLink>

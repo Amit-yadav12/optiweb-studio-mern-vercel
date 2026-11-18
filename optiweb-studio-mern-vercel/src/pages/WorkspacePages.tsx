@@ -3,30 +3,61 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ArrowRight, FileCode2, Globe, ImageDown, Search, ScanSearch } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/WorkspaceShell";
 import { Button, ButtonLink } from "@/components/ui/Button";
-import { EmptyState, ErrorState, ProgressIndicator, StatusBadge } from "@/components/ui/Feedback";
+import { EmptyState, ErrorState, Notice, ProgressIndicator, StatusBadge } from "@/components/ui/Feedback";
 import { PageHeader, Panel, PanelHeader, StatStrip, TableShell, Td, Th } from "@/components/ui/Layout";
 import { ImageOptimizer } from "@/features/images/ImageOptimizer";
 import { FontOptimizer } from "@/features/fonts/FontOptimizer";
 import { AssetAnalyzer } from "@/features/assets/AssetAnalyzer";
 import { WebsiteAudit } from "@/features/audit/WebsiteAudit";
 import { SettingsForm } from "@/features/settings/SettingsForm";
+import { StorageUsageDetails, StorageUsagePanel } from "@/features/usage/StorageUsage";
 import { ApiClientError, api } from "@/lib/api-client";
 import { formatBytes, formatNumber, formatRelativeTime } from "@/lib/format";
 import { statusToneFor } from "@/lib/status";
-import type { HistoryEntry, HistoryPage as HistoryPageData, Preferences } from "@/types/domain";
+import type { HistoryEntry, HistoryPage as HistoryPageData, ImageCapacity, Preferences } from "@/types/domain";
 
 const FALLBACK_PREFS: Preferences = {
   defaultImageFormat: "webp", defaultQuality: 78, defaultMaxWidth: null,
   fontDisplayPolicy: "swap", analyzerThresholdKb: 300, reduceMotion: false, updatedAt: null,
 };
 
-type LimitsResponse = { maxFileBytes: number; maxFilesPerRequest: number; maxDecodedPixels: number; artifactTtlHours: number; avifSupported: boolean };
+/**
+ * Limits as the server reports them. `image` describes the Image Optimizer in
+ * the mode that is in effect; the other fields describe requests that carry
+ * files in their body. Every number shown in the workspace comes from here.
+ */
+type LimitsResponse = {
+  maxFileBytes: number;
+  maxFilesPerRequest: number;
+  maxBatchBytes?: number;
+  maxAssetFiles?: number;
+  maxDecodedPixels: number;
+  artifactTtlHours: number;
+  avifSupported: boolean;
+  image?: ImageCapacity;
+};
+
+/** Used only until the server has answered, and when it cannot be reached. */
+const FALLBACK_LIMITS: LimitsResponse = { maxFileBytes: 1_048_576, maxFilesPerRequest: 4, maxBatchBytes: 3_984_588, maxDecodedPixels: 24_000_000, artifactTtlHours: 720, avifSupported: false };
 
 function useLimits() {
-  const [limits, setLimits] = useState<LimitsResponse>({ maxFileBytes: 1_000_000, maxFilesPerRequest: 4, maxDecodedPixels: 24_000_000, artifactTtlHours: 720, avifSupported: false });
+  const [limits, setLimits] = useState<LimitsResponse>(FALLBACK_LIMITS);
   useEffect(() => { api.get<LimitsResponse>("/api/v1/limits").then(setLimits).catch(() => undefined); }, []);
   return limits;
 }
+
+const MB = 1024 * 1024;
+const wholeMb = (bytes: number): number => Math.max(1, Math.floor(bytes / MB));
+
+/** Why large uploads are not in use, in words for the person running the deployment. */
+const DIRECT_UNAVAILABLE: Record<string, string> = {
+  storage_not_configured: "Object storage is not connected to this deployment.",
+  storage_disabled: "Object storage is switched off on this deployment.",
+  storage_unsupported_host: "This host cannot stream large files.",
+  storage_local_dir_missing: "The local storage directory is not configured.",
+  database_not_configured: "The database is not configured on this deployment.",
+  database_unavailable: "The database cannot be reached right now.",
+};
 
 function usePreferences() {
   const [prefs, setPrefs] = useState<Preferences>(FALLBACK_PREFS);
@@ -47,8 +78,42 @@ function PageFrame({ title, context, eyebrow, description, maxWidth = "max-w-6xl
 
 export function ImagePage() {
   const limits = useLimits();
-  return <PageFrame title="Image Optimizer" context="Convert, compress and compare — measured from real output" eyebrow="Tool" description="Reduce image weight while preserving the visual quality you need." actions={<ButtonLink href="/app/history" variant="secondary" size="sm">Past results</ButtonLink>}>
-    <ImageOptimizer limits={{ maxFileMb: Math.max(1, Math.floor(limits.maxFileBytes / 1024 / 1024)), maxFiles: limits.maxFilesPerRequest, maxDecodedPixels: limits.maxDecodedPixels, avifSupported: limits.avifSupported }} />
+  const image = limits.image;
+  const direct = image?.mode === "direct";
+  const [usageTick, setUsageTick] = useState(0);
+  const optimizerLimits = image
+    ? {
+        mode: image.mode,
+        maxFileMb: wholeMb(image.maxFileBytes),
+        maxFiles: image.maxFiles,
+        maxBatchMb: Math.round((image.maxBatchBytes / MB) * 10) / 10,
+        maxDecodedPixels: image.maxDecodedPixels,
+        avifSupported: limits.avifSupported,
+        sourceTtlHours: image.sourceTtlHours,
+        artifactTtlHours: image.artifactTtlHours,
+      }
+    : {
+        mode: "request" as const,
+        maxFileMb: wholeMb(limits.maxFileBytes),
+        maxFiles: limits.maxFilesPerRequest,
+        maxBatchMb: limits.maxBatchBytes ? Math.round((limits.maxBatchBytes / MB) * 10) / 10 : undefined,
+        maxDecodedPixels: limits.maxDecodedPixels,
+        avifSupported: limits.avifSupported,
+      };
+  return <PageFrame title="Image Optimizer" context="Convert, compress and compare — measured from real output" eyebrow="Tool" description="Reduce image weight while preserving the visual quality you need." actions={<ButtonLink href="/app/history" variant="secondary" size="sm">History</ButtonLink>}>
+    {image && !direct && image.directUnavailableReason ? (
+      <Notice tone="neutral" title={`Standard uploads: up to ${wholeMb(image.maxFileBytes)} MB per file, ${image.maxFiles} files per batch`}>
+        Larger files need direct uploads to object storage, which are not in use here: {DIRECT_UNAVAILABLE[image.directUnavailableReason] ?? "they are not available on this deployment."}
+      </Notice>
+    ) : null}
+    <ImageOptimizer limits={optimizerLimits} onJobSettled={() => setUsageTick((value) => value + 1)} />
+    {direct ? <StorageUsagePanel refreshKey={usageTick} /> : null}
+  </PageFrame>;
+}
+
+export function UsagePage() {
+  return <PageFrame title="Storage" context="What this session keeps on the server" eyebrow="Records" description="See how much of your storage quota is in use, what expires soon, and free space when you need it." maxWidth="max-w-5xl" actions={<ButtonLink href="/app/images" variant="primary" size="sm" leading={<ImageDown className="size-3.5" />}>New optimization</ButtonLink>}>
+    <StorageUsageDetails />
   </PageFrame>;
 }
 
@@ -63,7 +128,7 @@ export function AssetsPage() {
   const limits = useLimits();
   const prefs = usePreferences();
   return <PageFrame title="Asset Analyzer" context="Evidence-based diagnostics for uploaded files" eyebrow="Diagnostic" description="Inspect image weight, dimensions and CSS font-loading gaps before converting anything." maxWidth="max-w-5xl">
-    <AssetAnalyzer defaults={{ thresholdKb: prefs.analyzerThresholdKb, maxFileMb: Math.max(1, Math.floor(limits.maxFileBytes / 1024 / 1024)), maxFiles: limits.maxFilesPerRequest }} />
+    <AssetAnalyzer defaults={{ thresholdKb: prefs.analyzerThresholdKb, maxFileMb: wholeMb(limits.maxFileBytes), maxFiles: limits.maxAssetFiles ?? limits.maxFilesPerRequest, maxBatchMb: limits.maxBatchBytes ? Math.round((limits.maxBatchBytes / MB) * 10) / 10 : undefined }} />
   </PageFrame>;
 }
 

@@ -3,14 +3,20 @@
  * In-memory only: it survives client-side navigation, never a page refresh, and
  * is deliberately not persisted anywhere.
  */
-let pendingFile: File | null = null;
+let pendingFiles: File[] = [];
 
-export function stageFileForOptimizer(file: File): void {
-  pendingFile = file;
+/** Hands one or more files to the Image Optimizer. They are added to its queue when it opens. */
+export function stageFilesForOptimizer(files: File[]): void {
+  pendingFiles = [...files];
 }
 
-export function takeStagedFile(): File | null {
-  const file = pendingFile;
-  pendingFile = null;
-  return file;
+export function stageFileForOptimizer(file: File): void {
+  stageFilesForOptimizer([file]);
+}
+
+/** The staged files, once. A second call returns nothing. */
+export function takeStagedFiles(): File[] {
+  const files = pendingFiles;
+  pendingFiles = [];
+  return files;
 }

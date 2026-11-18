@@ -207,9 +207,11 @@ app.get("/api/v1/history", bridge(history.GET));
 app.delete("/api/v1/history", bridge(history.DELETE));
 app.get("/api/v1/history/:id", bridgeDynamic(historyDetail.GET));
 app.delete("/api/v1/history/:id", bridgeDynamic(historyDetail.DELETE));
+// Registered before the `:id` routes, so that "zip" is not read as an artifact ID.
+app.get("/api/v1/artifacts/zip", bridge(artifactZip.GET));
+app.post("/api/v1/artifacts/zip", bridge(artifactZip.POST));
 app.get("/api/v1/artifacts/:id/status", bridgeDynamic(pipeline.artifactStatus));
 app.get("/api/v1/artifacts/:id", bridgeDynamic(artifact.GET));
-app.post("/api/v1/artifacts/zip", bridge(artifactZip.POST));
 // Direct-upload pipeline: jobs, uploads, usage.
 app.post("/api/v1/jobs/image-optimization", bridge(pipeline.createJob));
 app.get("/api/v1/jobs/:id", bridgeDynamic(pipeline.getJob));
@@ -247,7 +249,7 @@ app.all("/api/v1/css/patch-font-display", methodNotAllowed(["POST"]));
 app.all("/api/v1/audits", methodNotAllowed(["POST"]));
 app.all("/api/v1/history", methodNotAllowed(["GET", "DELETE"]));
 app.all("/api/v1/history/:id", methodNotAllowed(["GET", "DELETE"]));
-app.all("/api/v1/artifacts/zip", methodNotAllowed(["POST"]));
+app.all("/api/v1/artifacts/zip", methodNotAllowed(["GET", "POST"]));
 app.all("/api/v1/artifacts/:id/status", methodNotAllowed(["GET"]));
 app.all("/api/v1/artifacts/:id", methodNotAllowed(["GET"]));
 app.all("/api/v1/jobs/image-optimization", methodNotAllowed(["POST"]));

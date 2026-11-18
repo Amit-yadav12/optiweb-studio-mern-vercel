@@ -100,6 +100,19 @@ jobs:
           NODE_ENV: test
         run: npm run test:pipeline
 
+      # The Image Optimizer screen in direct-upload mode, in a DOM, against the
+      # same API: choose files, upload, follow the job, download.
+      - name: Direct-upload screen in a DOM (in-memory database stand-in)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:dom:direct
+
+      - name: Direct-upload screen in a DOM against an isolated MongoDB
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_screen_${{ github.run_id }}_${{ github.run_attempt }}
+          NODE_ENV: test
+        run: npm run test:dom:direct
+
       - name: Persistence, rollback and credential checks against an isolated MongoDB
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
