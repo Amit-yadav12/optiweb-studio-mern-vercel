@@ -130,6 +130,10 @@ jobs:
           MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_${{ github.run_id }}_${{ github.run_attempt }}
           NODE_ENV: test
           PORT: "5000"
+          # The server runs with object storage on local disk, so that direct
+          # uploads and background jobs are in effect, as they are with Vercel Blob.
+          OW_STORAGE_DRIVER: local
+          OW_LOCAL_STORAGE_DIR: ${{ runner.temp }}/optiweb-objects
         run: |
           npm start > server.log 2>&1 &
           SERVER_PID=$!
@@ -142,7 +146,8 @@ jobs:
           node scripts/api-selftest.mjs http://127.0.0.1:5000
           STATUS=$?
           # The check that the production job runs, here against a server with a
-          # database: the converted file is stored and downloaded by its URL.
+          # database and object storage: a standard upload is stored and
+          # downloaded by its URL, and a background job runs end to end.
           node scripts/deployed-smoke.mjs http://127.0.0.1:5000 --expect-build
           SMOKE=$?
           set -e

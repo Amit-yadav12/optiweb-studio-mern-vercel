@@ -34,6 +34,28 @@ Intel Xeon 2.60 GHz, 2 logical CPUs, 3.8 GB RAM, Node 22.22.3, sharp 0.35.5 (lib
 
 Every run succeeded on the first attempt (no retries). The first and second run in a process took the same time: loading the image library is not a measurable part of a conversion.
 
+## GitHub Actions runner
+
+AMD EPYC 9V45, 4 logical CPUs, 15.6 GB RAM, Node 22.23.4, same sharp and libvips. Run in CI (job "Capacity benchmark", commit `a71e2ff`).
+
+| Scenario | Files | Input | Megapixels | Result | Transform | Whole job | Output | Peak memory |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 MB | 1 | 1 MB | 2.2 MP | completed | 0.3 s | 0.3 s | 0.6 MB | 229 MB |
+| 5 MB | 1 | 5 MB | 8.6 MP | completed | 1.0 s | 1.0 s | 2.4 MB | 311 MB |
+| 10 MB | 1 | 10 MB | 11.8 MP | completed | 1.4 s | 1.4 s | 3.3 MB | 388 MB |
+| 20 MB | 1 | 20 MB | 19.4 MP | completed | 2.3 s | 2.3 s | 5.4 MB | 494 MB |
+| 25 MB | 1 | 25 MB | 38.9 MP | completed | 4.6 s | 4.7 s | 10.8 MB | 737 MB |
+| 40 MP JPEG → WebP | 1 | 18.6 MB | 40 MP | completed | 4.9 s | 4.9 s | 12.2 MB | 704 MB |
+| 40 MP JPEG → JPEG | 1 | 18.6 MB | 40 MP | completed | 4.4 s | 4.4 s | 8.4 MB | 704 MB |
+| 40 MP JPEG → AVIF | 1 | 18.6 MB | 40 MP | refused: AVIF output is limited to 16 MP | 0.0 s | 0.1 s | – | – |
+| 12 MP transparent PNG → WebP | 1 | 1.2 MB | 12 MP | completed | 1.5 s | 1.5 s | 0.5 MB | 534 MB |
+| 16 MP JPEG → AVIF | 1 | 6 MB | 15.4 MP | completed | 8.1 s | 8.2 s | 2.6 MB | 708 MB |
+| 10 mixed files in one job | 10 | 83 MB | 89.5 MP | completed | 10.5 s | 10.6 s | 24.9 MB | 605 MB |
+| Two jobs at once, 3 × 10 MB each | 6 | 60 MB | – | 6 of 6 converted, one job per worker run | – | 8.4 s | – | 421 MB |
+| Corrupt JPEG + PNG whose header claims 900 MP + one valid file | 3 | 0.6 MB | – | partial: two rejected, one converted | 0.1 s | 0.2 s | 0.3 MB | 190 MB |
+
+Memory is the same on both machines, as expected: it depends on the image, not on the CPU. Time differs by the speed of one core.
+
 ## What follows from it
 
 - **Memory.** A 40 MP image peaks at about 0.8 GB, inside a 2 GB function. That holds because files are converted one at a time; two 40 MP images at once would not be safe, so the worker never does that.

@@ -19,13 +19,20 @@
  *    host's own "not found" page means the server function is missing.
  *  - Can an image be converted and the converted file downloaded: by URL when
  *    it was stored, or from the response when it was not?
+ *  - When the site reports direct uploads: does a background job work end to
+ *    end? The script creates a job, uploads one file straight to object
+ *    storage with the authorization the site issues (Vercel Blob, or the
+ *    local driver on a development server), confirms it, follows the job and
+ *    downloads the result. This is the only check here that exercises the
+ *    real storage service.
  *
- * It uploads one small generated image and changes nothing else. Database
+ * It uploads small generated images and changes nothing else. Database
  * readiness is reported but does not fail the run, because conversion and
  * download work without a database.
  */
 import fs from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
+import { put } from "@vercel/blob/client";
 import sharp from "sharp";
 import { createChecker, imageForm, jpegImage } from "./lib/selftest-kit.mjs";
 
@@ -146,6 +153,62 @@ check(
   `${route}: ${file?.length ?? 0} bytes, ${image?.format ?? "not an image"}; the result reports ${result?.outputBytes ?? "no"} bytes`,
 );
 if (file) note(`converted ${source.length} → ${file.length} bytes; ${route}`);
+
+/* ------------------------------------------------- direct upload and job */
+const capacity = limits.json?.data?.image;
+if (capacity?.mode === "direct") {
+  section("direct upload: job, upload to object storage, worker, download");
+  let cookie = "";
+  /** A JSON request in one guest session, as a browser's cookie jar gives it. */
+  const api = async (method, pathname, body) => {
+    const response = await request(pathname, {
+      method,
+      headers: { ...(cookie ? { cookie } : {}), ...(body !== undefined ? { "content-type": "application/json" } : {}) },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    cookie ||= (response.headers?.get("set-cookie") ?? "").split(";")[0];
+    return response;
+  };
+  const picture = await jpegImage(640, 400, { r: 200, g: 120, b: 40 });
+  const created = await api("POST", "/api/v1/jobs/image-optimization", { files: [{ name: "smoke-direct.jpg", type: "image/jpeg", size: picture.length }], settings: { format: "webp" } });
+  const item = created.json?.data?.job?.items?.[0];
+  check("a job is created for one file", created.status === 201 && typeof item?.id === "string", `${seen(created)}${created.json?.error?.code ? `, ${created.json.error.code}` : ""}`);
+
+  const token = item ? await api("POST", "/api/v1/uploads/token", { uploadId: item.id }) : null;
+  const grant = token?.json?.data?.upload;
+  check("an upload authorization is issued", token?.status === 200 && (grant?.transport === "vercel-blob" || grant?.transport === "local"), token ? seen(token) : "no job");
+
+  let sent = "not sent";
+  if (grant?.transport === "vercel-blob") {
+    // The same call a browser makes: straight to the storage service, with the short-lived client token.
+    sent = await put(grant.pathname, picture, { access: grant.access, token: grant.clientToken, contentType: grant.contentType, multipart: false }).then(() => "stored", (error) => `refused (${error?.name ?? "error"})`);
+  } else if (grant?.transport === "local") {
+    const stored = await request(grant.uploadUrl, { method: "PUT", headers: { cookie, "content-type": grant.contentType }, body: picture });
+    sent = stored.status === 200 ? "stored" : `refused (${seen(stored)})`;
+  }
+  check(`the file is uploaded straight to object storage (${grant?.transport ?? "no transport"})`, sent === "stored", sent);
+
+  const confirmed = item ? await api("POST", "/api/v1/uploads/complete", { uploadId: item.id }) : null;
+  check("the upload is confirmed and the job is handed to the worker", confirmed?.status === 202 && confirmed.json?.data?.queued === true, confirmed ? `${seen(confirmed)}${confirmed.json?.error?.code ? `, ${confirmed.json.error.code}` : ""}` : "no job");
+
+  let job = confirmed?.json?.data?.job ?? null;
+  const jobDeadline = Date.now() + 120_000;
+  while (job && !["completed", "partial", "failed", "cancelled"].includes(job.state) && Date.now() < jobDeadline) {
+    await sleep(1_500);
+    job = (await api("GET", `/api/v1/jobs/${job.id}`)).json?.data?.job ?? job;
+  }
+  const converted = job?.items?.[0];
+  check("the worker converts the file", job?.state === "completed" && converted?.state === "completed" && converted.result?.outputFormat === "webp", `job ${job?.state ?? "missing"}${converted?.errorCode ? `, ${converted.errorCode}` : ""}`);
+
+  const fetched = converted?.artifactId ? await request(`/api/v1/artifacts/${converted.artifactId}?download=1`, { headers: { cookie } }) : null;
+  const picked = fetched?.status === 200 ? await sharp(fetched.bytes).metadata().catch(() => null) : null;
+  check("the result is streamed back to the session that owns it", fetched?.status === 200 && fetched.bytes.length === converted.result.outputBytes && picked?.format === "webp" && picked.width === 640, fetched ? `${seen(fetched)}, ${fetched.bytes.length} bytes` : "no artifact");
+  const stranger = converted?.artifactId ? await request(`/api/v1/artifacts/${converted.artifactId}?download=1`) : null;
+  check("a request without that session does not get the file", stranger?.status === 404, stranger ? seen(stranger) : "no artifact");
+  if (job?.state === "completed") note(`direct upload via ${grant?.transport}: ${picture.length} → ${converted.result.outputBytes} bytes in a background job`);
+} else if (apiDeployed) {
+  note(`direct uploads are not in effect (${capacity?.directUnavailableReason ?? "the site does not report a mode"}); the standard upload was tested`);
+}
 
 const ok = report();
 process.exit(ok ? 0 : 1);
