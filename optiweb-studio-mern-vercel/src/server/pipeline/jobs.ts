@@ -19,7 +19,7 @@ import { stableUuid } from "./ids.js";
 import { SIGNATURE_BYTES, rasterContentType, sniffSignature } from "./signature.js";
 import { hasPipelineStoreOverride, isDuplicateKey, pipelineStore, type ArtifactRecord, type ItemRecord, type JobItemSnapshot, type JobRecord, type PipelineStore } from "./store.js";
 import { kickWorker } from "./trigger.js";
-import { acquireJobSlot, reconcileSession, recordDay, releaseJobSlot, releaseReservation, releaseSource, reserveUploadBytes, settleUpload } from "./usage.js";
+import { acquireJobSlot, recordDay, recordJob, releaseJobSlot, releaseReservation, releaseSource, reserveUploadBytes, settleUpload } from "./usage.js";
 import type { ImageJob, ImageJobItem, ImageOptimizeSettings, JobItemState, JobState, UploadGrantView } from "../../types/domain.js";
 
 export const ACTIVE_STATES: JobState[] = ["created", "uploading", "uploaded", "queued", "processing"];
@@ -271,27 +271,6 @@ export async function createImageJob(sessionId: string, input: CreateJobInput): 
     if (existing) return { job: await viewOf(store, existing), replayed: true };
   }
 
-  // Admission. Each step is one conditional update, so concurrent requests cannot both pass a limit.
-  if (!(await acquireJobSlot(sessionId))) {
-    // The counter can be stale after an interrupted request. Recount once before refusing.
-    await reconcileSession(sessionId);
-    if (!(await acquireJobSlot(sessionId))) {
-      throw new ApiError(429, "too_many_active_jobs", `This session already has ${capacity.maxActiveJobs} unfinished jobs.`, {
-        hint: "Wait for a job to finish, or cancel one, then try again.",
-      });
-    }
-  }
-  const reservation = await reserveUploadBytes(sessionId, totalBytes);
-  if (!reservation.ok) {
-    await releaseJobSlot(sessionId, false);
-    if (reservation.reason === "session_quota") {
-      throw new ApiError(403, "quota_exceeded", `These files need ${mb(totalBytes)} MB, which does not fit in this session's ${mb(capacity.sessionQuotaBytes)} MB of storage.`, {
-        hint: "Delete jobs you no longer need in History, or wait for stored files to expire.",
-      });
-    }
-    throw new ApiError(503, "capacity_exhausted", "The service has reached its upload capacity for now.", { hint: "Please try again later." });
-  }
-
   const now = new Date();
   const expireAt = new Date(now.getTime() + capacity.historyTtlMs);
   const items: ItemRecord[] = files.map((file, index) => {
@@ -307,8 +286,9 @@ export async function createImageJob(sessionId: string, input: CreateJobInput): 
       path: sourcePath(sessionId, jobId, id, file.filename),
       state: "awaiting_upload",
       sourceStored: false,
+      // The bytes this file will hold. They count against the quota once the job is admitted (`holdKind`).
       heldBytes: file.bytes,
-      holdKind: "reservation",
+      holdKind: "none",
       attempts: 0,
       errorCode: null,
       message: null,
@@ -348,30 +328,62 @@ export async function createImageJob(sessionId: string, input: CreateJobInput): 
     claims: 0,
     cancelRequested: false,
     pixelsUsed: 0,
-    slotReleased: false,
+    admitted: false,
     uploadDeadline: new Date(now.getTime() + capacity.uploadPhaseTtlMs),
     expireAt,
   };
 
+  // Admission. The order matters, and every step is one atomic write:
+  //
+  //  1. The job record. Its ID is unique, so of several requests with the
+  //     same idempotency key exactly one creates the job.
+  //  2. A job slot of the session.
+  //  3. The file records, not yet counted against the quota.
+  //  4. The storage reservation: session quota, application budget, today's budget.
+  //  5. Only then is the job marked admitted and its files counted.
+  //
+  // Records are written before the counters move, so a recount that runs in
+  // between can only count too much, never too little. A refusal at any step
+  // removes what the earlier steps wrote.
   try {
     await store.jobs.insertOne(job);
   } catch (error) {
-    await Promise.all([releaseReservation(sessionId, totalBytes), releaseJobSlot(sessionId, false)]);
     if (isDuplicateKey(error)) {
-      // A concurrent request with the same idempotency key created the job first.
       const existing = await store.jobs.findOne({ _id: jobId, sessionId, mode: "async" });
       if (existing) return { job: await viewOf(store, existing), replayed: true };
     }
     throw error;
   }
+  const undo = async (withSlot: boolean): Promise<void> => {
+    await Promise.all([store.items.deleteMany({ jobId }), store.jobs.deleteOne({ _id: jobId, admitted: false }), withSlot ? releaseJobSlot(sessionId, jobId) : Promise.resolve()]);
+  };
   try {
+    if (!(await acquireJobSlot(sessionId, jobId))) {
+      await undo(false);
+      throw new ApiError(429, "too_many_active_jobs", `This session already has ${capacity.maxActiveJobs} unfinished jobs.`, {
+        hint: "Wait for a job to finish, or cancel one, then try again.",
+      });
+    }
     for (const item of items) await store.items.insertOne(item);
+    const reservation = await reserveUploadBytes(sessionId, totalBytes);
+    if (!reservation.ok) {
+      await undo(true);
+      if (reservation.reason === "session_quota") {
+        throw new ApiError(403, "quota_exceeded", `These files need ${mb(totalBytes)} MB, which does not fit in this session's ${mb(capacity.sessionQuotaBytes)} MB of storage.`, {
+          hint: "Delete jobs you no longer need in History, or wait for stored files to expire.",
+        });
+      }
+      throw new ApiError(503, "capacity_exhausted", "The service has reached its upload capacity for now.", { hint: "Please try again later." });
+    }
   } catch (error) {
-    await Promise.all([store.items.deleteMany({ jobId }), store.jobs.deleteOne({ _id: jobId }), releaseReservation(sessionId, totalBytes), releaseJobSlot(sessionId, false)]);
+    if (!(error instanceof ApiError) || isDatabaseError(error)) await undo(true).catch(() => undefined);
     throw error;
   }
+  await store.items.updateMany({ jobId }, { $set: { holdKind: "reservation" } });
+  await store.jobs.updateOne({ _id: jobId }, { $set: { admitted: true } });
+  await recordJob(sessionId, false);
   void recordDay({ jobs: 1 });
-  return { job: toJobView(job, items, []), replayed: false };
+  return { job: toJobView({ ...job, admitted: true }, items.map((item) => ({ ...item, holdKind: "reservation" as const })), []), replayed: false };
 }
 
 /* ------------------------------------------------------------------ uploads */
@@ -394,7 +406,7 @@ export async function issueUploadGrant(sessionId: string, uploadId: string): Pro
   const { item, job } = await ownedItem(store, sessionId, uploadId);
   if (item.state !== "awaiting_upload") throw conflict("This file has already been uploaded or removed.");
   const now = Date.now();
-  if (!UPLOAD_PHASE.includes(job.state) || job.uploadDeadline.getTime() <= now) {
+  if (!job.admitted || !UPLOAD_PHASE.includes(job.state) || job.uploadDeadline.getTime() <= now) {
     throw conflict("This job no longer accepts uploads.", "Start a new job.");
   }
   const validUntil = Math.min(now + capacity.uploadTokenTtlMs, job.uploadDeadline.getTime());
@@ -575,21 +587,16 @@ export async function retryImageJob(sessionId: string, jobId: string): Promise<I
   if (eligible.length === 0) {
     throw conflict("None of the failed files can be retried.", "Their failures were not temporary, or their source files have been deleted. Upload them again in a new job.");
   }
-  if (!(await acquireJobSlot(sessionId))) {
-    await reconcileSession(sessionId);
-    if (!(await acquireJobSlot(sessionId))) {
-      throw new ApiError(429, "too_many_active_jobs", `This session already has ${capacity.maxActiveJobs} unfinished jobs.`, { hint: "Wait for a job to finish, then retry." });
-    }
+  // A running job needs a slot again. Taking it twice for the same job is harmless: the release removes both.
+  if (!(await acquireJobSlot(sessionId, job._id))) {
+    throw new ApiError(429, "too_many_active_jobs", `This session already has ${capacity.maxActiveJobs} unfinished jobs.`, { hint: "Wait for a job to finish, then retry." });
   }
   const now = new Date();
   const reopened = await store.jobs.updateOne(
     { _id: job._id, state: { $in: ["partial", "failed"] } },
-    { $set: { state: "queued", status: "queued", queuedAt: now, finishedAt: null, cancelRequested: false, slotReleased: false, leaseOwner: null, leaseUntil: null, updatedAt: now } },
+    { $set: { state: "queued", status: "queued", queuedAt: now, finishedAt: null, cancelRequested: false, leaseOwner: null, leaseUntil: null, updatedAt: now } },
   );
-  if (reopened.modified === 0) {
-    // Another request reopened the job first; give the extra slot back.
-    await releaseJobSlot(sessionId, false);
-  } else {
+  if (reopened.modified === 1) {
     await store.items.updateMany(
       { jobId: job._id, state: "failed", retryable: true, sourceStored: true },
       { $set: { state: "uploaded", attempts: 0, errorCode: null, message: null, retryable: false, finishedAt: null, purgeSourceAt: null } },

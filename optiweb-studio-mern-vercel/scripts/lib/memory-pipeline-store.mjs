@@ -7,8 +7,18 @@
  * It does not show that MongoDB accepts the same queries: the pipeline test
  * runs against a real MongoDB server in CI for that.
  */
+import { setTimeout as delay } from "node:timers/promises";
 import { Aggregator, Query } from "mingo";
 import { update as applyUpdate } from "mingo/updater";
+
+/**
+ * Every operation first waits a random moment, as a network round trip does.
+ * Each operation is still atomic, as it is in MongoDB, but operations of
+ * requests that run at the same time interleave in a different order on every
+ * run. Without this, concurrent requests would always run in the same order
+ * and a race between them could never show.
+ */
+const roundTrip = () => delay(Math.random() * 3);
 
 class DuplicateKeyError extends Error {
   constructor(id) {
@@ -29,7 +39,7 @@ function compare(a, b) {
 
 const valueAt = (doc, path) => path.split(".").reduce((value, key) => (value === null || value === undefined ? undefined : value[key]), doc);
 
-function memoryCollection() {
+function memoryCollection(latency = roundTrip) {
   const docs = new Map();
   const clone = (doc) => structuredClone(doc);
 
@@ -72,17 +82,21 @@ function memoryCollection() {
 
   return {
     async findOne(filter, options) {
+      await latency();
       const [first] = select(filter, { sort: options?.sort, limit: 1 });
       return first ? clone(first) : null;
     },
     async find(filter, options) {
+      await latency();
       return select(filter, options).map(clone);
     },
     async insertOne(doc) {
+      await latency();
       if (docs.has(doc._id)) throw new DuplicateKeyError(doc._id);
       docs.set(doc._id, clone(doc));
     },
     async updateOne(filter, update, options) {
+      await latency();
       const [target] = select(filter, { limit: 1 });
       if (!target) {
         if (!options?.upsert) return { matched: 0, modified: 0, upserted: false };
@@ -92,12 +106,14 @@ function memoryCollection() {
       return { matched: 1, modified: mutate(target, update, false) ? 1 : 0, upserted: false };
     },
     async updateMany(filter, update) {
+      await latency();
       const targets = select(filter);
       let modified = 0;
       for (const target of targets) if (mutate(target, update, false)) modified += 1;
       return { matched: targets.length, modified };
     },
     async findOneAndUpdate(filter, update, options) {
+      await latency();
       const [target] = select(filter, { sort: options?.sort, limit: 1 });
       const returnAfter = (options?.returnDocument ?? "after") === "after";
       if (!target) {
@@ -110,20 +126,24 @@ function memoryCollection() {
       return returnAfter ? clone(target) : before;
     },
     async deleteOne(filter) {
+      await latency();
       const [target] = select(filter, { limit: 1 });
       if (!target) return 0;
       docs.delete(target._id);
       return 1;
     },
     async deleteMany(filter) {
+      await latency();
       const targets = select(filter);
       for (const target of targets) docs.delete(target._id);
       return targets.length;
     },
     async countDocuments(filter) {
+      await latency();
       return select(filter).length;
     },
     async aggregate(pipeline) {
+      await latency();
       return new Aggregator(pipeline).run([...docs.values()].map(clone));
     },
     /** Test access: every document, unfiltered. */
@@ -140,5 +160,6 @@ export function createMemoryPipelineStore() {
     usage: memoryCollection(),
     days: memoryCollection(),
     rate: memoryCollection(),
+    slots: memoryCollection(),
   };
 }

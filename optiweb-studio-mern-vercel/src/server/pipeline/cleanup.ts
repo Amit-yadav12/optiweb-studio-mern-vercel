@@ -57,7 +57,14 @@ export async function runCleanup(options: { now?: Date; workerBudgetMs?: number 
 
   /* 1. Jobs still in their upload phase. */
   const settleBefore = new Date(now.getTime() - 5 * 60_000);
-  const uploading = await store.jobs.find({ mode: "async", state: { $in: ["created", "uploading"] }, createdAt: { $lt: settleBefore } }, { sort: { createdAt: 1 }, limit: BATCH });
+  // A record that was never admitted belongs to a request that died half-way. It holds nothing that was counted.
+  const unadmitted = await store.jobs.find({ mode: "async", admitted: false, createdAt: { $lt: settleBefore } }, { limit: BATCH });
+  for (const job of unadmitted) {
+    await Promise.all([store.items.deleteMany({ jobId: job._id }), store.slots.deleteMany({ jobId: job._id }), store.jobs.deleteOne({ _id: job._id, admitted: false })]);
+    touched.add(job.sessionId);
+    report.jobsAbandoned += 1;
+  }
+  const uploading = await store.jobs.find({ mode: "async", admitted: true, state: { $in: ["created", "uploading"] }, createdAt: { $lt: settleBefore } }, { sort: { createdAt: 1 }, limit: BATCH });
   for (const job of uploading) {
     // A file can be in storage without having been confirmed, when the browser closed right after the upload.
     const awaited = await store.items.find({ jobId: job._id, state: "awaiting_upload" });

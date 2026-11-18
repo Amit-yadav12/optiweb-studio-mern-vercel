@@ -160,8 +160,12 @@ export type JobRecord = {
   cancelRequested: boolean;
   /** Decoded pixels of the items processed so far, for the per-job pixel budget. */
   pixelsUsed: number;
-  /** True once the session's active-job slot has been given back. */
-  slotReleased: boolean;
+  /**
+   * True once the job holds a job slot and its storage reservation. Uploads
+   * are only authorized for an admitted job. A record that stays unadmitted
+   * belongs to a request that died half-way; the sweep removes it.
+   */
+  admitted: boolean;
   /** Uploads must finish before this time, or the job is cancelled. */
   uploadDeadline: Date;
   /** When MongoDB removes the record (History retention). */
@@ -247,7 +251,8 @@ export type UsageRecord = {
   reservedBytes: number;
   sourceBytes: number;
   artifactBytes: number;
-  activeJobs: number;
+  /** Incremented by every change to the byte counters. A recount is only written if it has not moved meanwhile. */
+  rev: number;
   uploads: number;
   uploadBytes: number;
   jobs: number;
@@ -274,6 +279,13 @@ export type DayRecord = {
 
 export type RateRecord = { _id: string; count: number; expireAt: Date };
 
+/**
+ * One of a session's active-job slots, held by one job. The `_id` names the
+ * session and the slot number, so MongoDB's unique `_id` guarantees that a
+ * slot has one holder, however many requests arrive together.
+ */
+export type SlotRecord = { _id: string; sessionId: string; jobId: string; createdAt: Date; expireAt: Date };
+
 export type PipelineStore = {
   jobs: DocCollection<JobRecord>;
   items: DocCollection<ItemRecord>;
@@ -281,6 +293,7 @@ export type PipelineStore = {
   usage: DocCollection<UsageRecord>;
   days: DocCollection<DayRecord>;
   rate: DocCollection<RateRecord>;
+  slots: DocCollection<SlotRecord>;
 };
 
 export const COLLECTIONS = {
@@ -290,6 +303,7 @@ export const COLLECTIONS = {
   usage: "optiweb_usage",
   days: "optiweb_usage_days",
   rate: "optiweb_rate_limits",
+  slots: "optiweb_job_slots",
 } as const;
 
 let override: PipelineStore | null = null;
@@ -322,6 +336,7 @@ export async function pipelineStore(): Promise<PipelineStore> {
     usage: db.collection(COLLECTIONS.usage),
     days: db.collection(COLLECTIONS.days),
     rate: db.collection(COLLECTIONS.rate),
+    slots: db.collection(COLLECTIONS.slots),
   };
   indexesReady ??= (async () => {
     // TTL indexes remove records only; object storage is cleaned by the
@@ -337,6 +352,8 @@ export async function pipelineStore(): Promise<PipelineStore> {
       raw.artifacts.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0 }),
       raw.days.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0 }),
       raw.rate.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0 }),
+      raw.slots.createIndex({ sessionId: 1 }),
+      raw.slots.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0 }),
     ]);
   })().catch((error: unknown) => {
     // Index creation is retried on the next call. The pipeline works without
@@ -352,5 +369,6 @@ export async function pipelineStore(): Promise<PipelineStore> {
     usage: mongoCollection<UsageRecord>("usage", raw.usage),
     days: mongoCollection<DayRecord>("days", raw.days),
     rate: mongoCollection<RateRecord>("rate", raw.rate),
+    slots: mongoCollection<SlotRecord>("slots", raw.slots),
   };
 }

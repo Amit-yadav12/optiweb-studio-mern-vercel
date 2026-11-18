@@ -510,7 +510,7 @@ await resetLimits();
   // the file marked as in progress with its attempt counted, and the lease still held by the dead worker.
   await store.items.updateOne({ _id: items[1]._id }, { $set: { state: "processing", attempts: 1, errorCode: null, message: null } });
   await store.items.updateOne({ _id: items[2]._id }, { $set: { state: "uploaded", attempts: 0 } });
-  await store.jobs.updateOne({ _id: job.id }, { $set: { state: "processing", status: "processing", leaseOwner: "dead-worker", leaseUntil: new Date(Date.now() + 60_000), finishedAt: null, slotReleased: false } });
+  await store.jobs.updateOne({ _id: job.id }, { $set: { state: "processing", status: "processing", leaseOwner: "dead-worker", leaseUntil: new Date(Date.now() + 60_000), finishedAt: null } });
   const held = await drainJobs();
   check("while the dead worker's lease is live, no other worker takes the job", held.claimed === 0 && (await getJob(jade, job.id))?.state === "processing");
   await store.jobs.updateOne({ _id: job.id }, { $set: { leaseUntil: new Date(Date.now() - 1) } });
@@ -764,11 +764,44 @@ await resetLimits();
   const { job } = await submit(tess, [fileSpec("x.jpg", jpegSmall, "image/jpeg")]);
   await drainJobs();
   const truth = await usageOf(tess);
-  await store.usage.updateOne({ _id: sessionIdOf(tess) }, { $set: { sourceBytes: 999_999_999, artifactBytes: -5, reservedBytes: 12345, activeJobs: 7 } });
+  await store.usage.updateOne({ _id: sessionIdOf(tess) }, { $set: { sourceBytes: 999_999_999, artifactBytes: -5, reservedBytes: 12345 } });
   const { reconcileSession } = await import("../src/server/pipeline/usage.ts");
-  await reconcileSession(sessionIdOf(tess));
+  const written = await reconcileSession(sessionIdOf(tess));
   const repaired = await usageOf(tess);
-  check("a session's counters are recomputed from its records", repaired?.sourceBytes === truth.sourceBytes && repaired.artifactBytes === truth.artifactBytes && repaired.reservedBytes === 0 && repaired.activeJobs === 0, JSON.stringify(repaired && { source: repaired.sourceBytes, artifact: repaired.artifactBytes, active: repaired.activeJobs }));
+  check("a session's counters are recomputed from its records", written === true && repaired?.sourceBytes === truth.sourceBytes && repaired.artifactBytes === truth.artifactBytes && repaired.reservedBytes === 0, JSON.stringify(repaired && { source: repaired.sourceBytes, artifact: repaired.artifactBytes }));
+
+  // A recount must not overwrite a change that a request made while the recount was being computed.
+  const original = store.items.aggregate.bind(store.items);
+  store.items.aggregate = async (pipeline) => {
+    const rows = await original(pipeline);
+    // A request reserves 1,000 bytes after the recount read the counters and before it writes.
+    await store.usage.updateOne({ _id: sessionIdOf(tess) }, { $inc: { reservedBytes: 1000, rev: 1 } });
+    return rows;
+  };
+  const raced = await reconcileSession(sessionIdOf(tess));
+  store.items.aggregate = original;
+  const kept = await usageOf(tess);
+  check("a recount that raced with a request is dropped, and the request's change survives", raced === false && kept?.reservedBytes === 1000, `written ${raced}, reserved ${kept?.reservedBytes}`);
+  await store.usage.updateOne({ _id: sessionIdOf(tess) }, { $inc: { reservedBytes: -1000, rev: 1 } });
+
+  // A slot left behind by a request that died is taken back when the session needs one.
+  const stale = await newSession();
+  const digestOf = (await store.slots.find({})).length;
+  void digestOf;
+  const finishedJob = await submit(stale, [fileSpec("s.jpg", jpegSmall, "image/jpeg")]);
+  await drainJobs();
+  // Simulate two leaked slots: one for a job that has finished, one for a job that was never created.
+  const { acquireJobSlot, activeJobCount } = await import("../src/server/pipeline/usage.ts");
+  await acquireJobSlot(sessionIdOf(stale), finishedJob.job.id);
+  await acquireJobSlot(sessionIdOf(stale), "00000000-0000-4000-8000-00000000dead");
+  check("both slots are taken", (await activeJobCount(sessionIdOf(stale))) === 2);
+  const blocked = await createJob(stale, [fileSpec("n.png", await pngOfSize(3000), "image/png")]);
+  check("a slot held by a finished job is taken back; one held for a job that may still be starting is not", blocked.status === 201 && (await activeJobCount(sessionIdOf(stale))) === 2, `status ${blocked.status}, slots ${await activeJobCount(sessionIdOf(stale))}`);
+  const refusedNow = await createJob(stale, [fileSpec("n2.png", await pngOfSize(3000), "image/png")]);
+  check("the young orphan slot still counts, so a third job is refused", refusedNow.status === 429, `status ${refusedNow.status}`);
+  await store.slots.updateMany({ jobId: "00000000-0000-4000-8000-00000000dead" }, { $set: { createdAt: new Date(Date.now() - 3 * 60_000) } });
+  const later = await createJob(stale, [fileSpec("n3.png", await pngOfSize(3000), "image/png")]);
+  check("after two minutes without a job record, the orphan slot is taken back too", later.status === 201, `status ${later.status}`);
 
   // Deleting a job removes its files from storage and its usage.
   const { purgeJob } = await import("../src/server/pipeline/cleanup.ts");

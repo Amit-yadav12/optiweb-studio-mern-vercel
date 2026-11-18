@@ -29,7 +29,7 @@ import { ObjectStorageError, getObjectStorage, readAll, storageTtlDays, type Obj
 import { stableUuid } from "./ids.js";
 import { ACTIVE_STATES, isDatabaseError, loadJobParts, snapshotItems, totalsOf } from "./jobs.js";
 import { pipelineStore, type ArtifactRecord, type ItemRecord, type ItemResult, type JobRecord, type PipelineStore } from "./store.js";
-import { recordDay, recordOutput, releaseArtifact, releaseJobSlot, releaseReservation, releaseSource, reserveArtifactBytes } from "./usage.js";
+import { recordDay, recordJob, recordOutput, releaseArtifact, releaseJobSlot, releaseReservation, releaseSource, reserveArtifactBytes } from "./usage.js";
 import type { JobState } from "../../types/domain.js";
 
 const PROCESS_ID = randomUUID().slice(0, 8);
@@ -309,8 +309,9 @@ async function finalizeJob(store: PipelineStore, jobId: string, owner: string): 
   if (!closed) return false;
   // Sources are kept for a while so that failed files can be retried, then deleted by the cleanup routine.
   await store.items.updateMany({ jobId, sourceStored: true }, { $set: { purgeSourceAt: new Date(now.getTime() + capacity.sourceTtlMs) } });
-  const slot = await store.jobs.findOneAndUpdate({ _id: jobId, slotReleased: false }, { $set: { slotReleased: true } }, { returnDocument: "before" });
-  if (slot) await releaseJobSlot(closed.sessionId, state === "failed");
+  // Deleting the slot is idempotent, so a repeated finalisation cannot free a slot twice.
+  await releaseJobSlot(closed.sessionId, jobId);
+  if (state === "failed") await recordJob(closed.sessionId, true);
   return true;
 }
 

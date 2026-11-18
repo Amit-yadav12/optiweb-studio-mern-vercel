@@ -4,7 +4,7 @@ import { isOwnedPath } from "../storage/objectPaths.js";
 import { getObjectStorage, type ObjectReader } from "../storage/objectStorage.js";
 import { pipelineAvailability, TERMINAL_STATES } from "./jobs.js";
 import { pipelineStore, type ArtifactRecord } from "./store.js";
-import { GLOBAL_USAGE_ID, readToday, readUsage, recordDay } from "./usage.js";
+import { GLOBAL_USAGE_ID, activeJobCount, readToday, readUsage, recordDay } from "./usage.js";
 import type { ImageCapacity, UsageSummary } from "../../types/domain.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -84,8 +84,9 @@ export async function usageSummary(sessionId: string): Promise<UsageSummary> {
   const store = await pipelineStore();
   const now = new Date();
   const soon = new Date(now.getTime() + 3 * 86_400_000);
-  const [usage, sources, artifacts, expiring, jobs] = await Promise.all([
+  const [usage, activeJobs, sources, artifacts, expiring, jobs] = await Promise.all([
     readUsage(sessionId),
+    activeJobCount(sessionId),
     store.items.countDocuments({ sessionId, sourceStored: true }),
     store.artifacts.countDocuments({ sessionId, storage: "object", deletedAt: null }),
     store.artifacts.find({ sessionId, storage: "object", deletedAt: null, availableUntil: { $lt: soon } }, { sort: { availableUntil: 1 }, limit: 20 }),
@@ -104,7 +105,7 @@ export async function usageSummary(sessionId: string): Promise<UsageSummary> {
     sourceBytes,
     artifactBytes,
     nearQuota: usedBytes >= capacity.sessionQuotaBytes * capacity.warnAtFraction,
-    activeJobs: clamp(usage.activeJobs),
+    activeJobs,
     files: { sources, artifacts },
     expiringSoon: expiring.map((artifact) => ({ artifactId: artifact._id, filename: artifact.filename, bytes: artifact.byteSize, expiresAt: artifact.availableUntil.toISOString(), jobId: artifact.jobId })),
     lifetime: { uploads: clamp(usage.uploads), uploadBytes: clamp(usage.uploadBytes), jobs: clamp(usage.jobs), failedJobs: clamp(usage.failedJobs), outputBytes: clamp(usage.outputBytes) },
