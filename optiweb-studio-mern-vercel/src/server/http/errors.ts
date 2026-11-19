@@ -13,6 +13,17 @@ export type ApiErrorCode =
   | "not_found"
   | "unprocessable_entity"
   | "storage_unavailable"
+  /** The request is valid but does not fit the current state of the resource. */
+  | "conflict"
+  /** The session's storage quota would be exceeded. */
+  | "quota_exceeded"
+  /** The session already has the maximum number of unfinished jobs. */
+  | "too_many_active_jobs"
+  /** The application's own storage or daily upload budget is used up. */
+  | "capacity_exhausted"
+  /** Direct uploads need object storage and the database; one of them is not available. */
+  | "direct_uploads_unavailable"
+  | "unauthorized"
   | "internal_error";
 
 export class ApiError extends Error {
@@ -62,3 +73,6 @@ export const unprocessable = (message: string, hint?: string) =>
 
 export const storageUnavailable = (message: string, hint?: string) =>
   new ApiError(503, "storage_unavailable", message, { hint });
+
+export const conflict = (message: string, hint?: string) =>
+  new ApiError(409, "conflict", message, { hint });

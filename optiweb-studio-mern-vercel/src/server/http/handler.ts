@@ -55,17 +55,19 @@ function parseCookies(header: string | null): Record<string, string> {
   return out;
 }
 
+/** The session ID carried by a Cookie header, or null when there is none or it is malformed. */
+export function sessionFromCookieHeader(header: string | null | undefined): string | null {
+  const existing = parseCookies(header ?? null)[SESSION_COOKIE];
+  return existing && /^[a-f0-9-]{16,64}$/i.test(existing) ? existing : null;
+}
+
 /**
  * Reads the guest session id. Sessions are opaque random ids stored in an
  * httpOnly cookie; they scope history and artifacts without any account system.
  */
 function resolveSession(req: Request): { sessionId: string; issued: boolean } {
-  const cookies = parseCookies(req.headers.get("cookie"));
-  const existing = cookies[SESSION_COOKIE];
-  if (existing && /^[a-f0-9-]{16,64}$/i.test(existing)) {
-    return { sessionId: existing, issued: false };
-  }
-  return { sessionId: randomUUID(), issued: true };
+  const existing = sessionFromCookieHeader(req.headers.get("cookie"));
+  return existing ? { sessionId: existing, issued: false } : { sessionId: randomUUID(), issued: true };
 }
 
 function sessionCookie(sessionId: string): string {
@@ -116,6 +118,30 @@ export function binaryOk(
   if (meta.filename) {
     headers.set("content-disposition", contentDisposition(meta.filename));
   }
+  if (ctx.sessionIssued) headers.append("set-cookie", sessionCookie(ctx.sessionId));
+  return new Response(body, { status: 200, headers: headers.flush() });
+}
+
+/** Internal marker: the Express bridge pipes a response that carries it instead of buffering it. Never sent to a client. */
+export const STREAM_MARKER = "x-optiweb-stream";
+
+/**
+ * A file download that is streamed, for files too large to buffer. Memory use
+ * stays flat, and the response is not subject to the host's limit on buffered
+ * response bodies.
+ */
+export function streamOk(
+  body: ReadableStream<Uint8Array>,
+  ctx: RouteContext,
+  meta: { contentType: string; bytes: number; disposition: string; headers?: Record<string, string> },
+): Response {
+  const headers = new RecordHeaders(meta.headers);
+  headers.set("content-type", meta.contentType);
+  headers.set("content-length", String(meta.bytes));
+  headers.set("content-disposition", meta.disposition);
+  headers.set("cache-control", "private, no-store");
+  headers.set("x-content-type-options", "nosniff");
+  headers.set(STREAM_MARKER, "1");
   if (ctx.sessionIssued) headers.append("set-cookie", sessionCookie(ctx.sessionId));
   return new Response(body, { status: 200, headers: headers.flush() });
 }

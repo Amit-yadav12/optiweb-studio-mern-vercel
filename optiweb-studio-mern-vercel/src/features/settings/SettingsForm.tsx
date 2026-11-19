@@ -7,6 +7,7 @@ import { Field, Input, Select } from "@/components/ui/Form";
 import { DefinitionRow, Panel, PanelHeader } from "@/components/ui/Layout";
 import { ApiClientError, api } from "@/lib/api-client";
 import { formatBytes, formatDateTime } from "@/lib/format";
+import { useServerLimits } from "@/lib/limits";
 import type { FontDisplayPolicy, ImageFormat, Preferences } from "@/types/domain";
 
 const FORMATS: Array<{ value: ImageFormat; label: string }> = [
@@ -27,6 +28,8 @@ const POLICIES: Array<{ value: FontDisplayPolicy; label: string }> = [
 
 export function SettingsForm({ defaults }: { defaults: Preferences }) {
   const { push } = useToast();
+  const { limits, known } = useServerLimits();
+  const image = limits.image;
   const [form, setForm] = useState<Preferences>(defaults);
   const [status, setStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [failure, setFailure] = useState<{ message: string; hint?: string } | null>(null);
@@ -214,7 +217,7 @@ export function SettingsForm({ defaults }: { defaults: Preferences }) {
           <dl>
             <DefinitionRow label="Session" value={session?.shortCode ?? "not issued yet"} />
             <DefinitionRow label="Mode" value="guest" />
-            <DefinitionRow label="Artifact retention" value="30 days by default (configurable)" />
+            <DefinitionRow label="Converted files kept" value={known ? `${Math.round((image?.artifactTtlHours ?? limits.artifactTtlHours) / 24)} days` : "…"} />
             <DefinitionRow label="Uploaded bytes kept" value="none — only produced results" />
           </dl>
           <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -232,14 +235,27 @@ export function SettingsForm({ defaults }: { defaults: Preferences }) {
 
         <Panel aria-labelledby="limits">
           <PanelHeader id="limits" title="Enforced limits" description="These are validated on the server; the interface mirrors them." />
-          <dl>
-            <DefinitionRow label="Max file size" value={formatBytes(10 * 1024 * 1024)} />
-            <DefinitionRow label="Max files per batch" value="8" />
-            <DefinitionRow label="Quality range" value="30 – 100" />
-            <DefinitionRow label="Dimension cap" value="8000 px" />
-            <DefinitionRow label="CSS length cap" value="400,000 characters" />
-            <DefinitionRow label="Requests" value="20 optimizations / minute / session" />
-          </dl>
+          {known ? (
+            <dl>
+              <DefinitionRow label="Upload mode" value={image?.mode === "direct" ? "Direct to storage, background job" : "Inside the request"} mono={false} />
+              <DefinitionRow label="Max file size" value={formatBytes(image?.maxFileBytes ?? limits.maxFileBytes)} />
+              <DefinitionRow label="Max files per batch" value={String(image?.maxFiles ?? limits.maxFilesPerRequest)} />
+              {image ? <DefinitionRow label="Max batch size" value={formatBytes(image.maxBatchBytes)} /> : null}
+              <DefinitionRow label="Decoded pixels per image" value={`${Math.round((image?.maxDecodedPixels ?? limits.maxDecodedPixels) / 1_000_000)} MP`} />
+              {image?.maxJobPixels ? <DefinitionRow label="Decoded pixels per batch" value={`${Math.round(image.maxJobPixels / 1_000_000)} MP`} /> : null}
+              {image?.avifMaxPixels ? <DefinitionRow label="Largest AVIF output" value={`${Math.round(image.avifMaxPixels / 1_000_000)} MP`} /> : null}
+              {image?.sessionQuotaBytes ? <DefinitionRow label="Storage per session" value={formatBytes(image.sessionQuotaBytes)} /> : null}
+              {image?.maxActiveJobs ? <DefinitionRow label="Jobs in progress" value={`up to ${image.maxActiveJobs}`} mono={false} /> : null}
+              <DefinitionRow label="Converted files kept" value={`${Math.round((image?.artifactTtlHours ?? limits.artifactTtlHours) / 24)} days`} mono={false} />
+              {image?.sourceTtlHours ? <DefinitionRow label="Source uploads kept" value={`${image.sourceTtlHours} hours after the job`} mono={false} /> : null}
+              <DefinitionRow label="Quality range" value="30 – 100" />
+              <DefinitionRow label="Dimension cap" value="8000 px" />
+              {limits.maxCssChars ? <DefinitionRow label="CSS length cap" value={`${limits.maxCssChars.toLocaleString("en-US")} characters`} /> : null}
+              {limits.maxAssetFiles ? <DefinitionRow label="Files per asset analysis" value={String(limits.maxAssetFiles)} /> : null}
+            </dl>
+          ) : (
+            <p className="text-sm text-muted">The limits are loaded from the server.</p>
+          )}
         </Panel>
       </div>
 

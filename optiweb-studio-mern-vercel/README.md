@@ -4,10 +4,11 @@
 
 ## Product capabilities
 
+- **High-capacity uploads:** with a private Vercel Blob store and MongoDB connected, the browser uploads files straight to storage (up to 25 MB each, 10 files and 150 MB per job) and a background job converts them. Jobs have states, real completion counts, retries, cancellation and recovery; results are streamed to the session that owns them. Storage per session, jobs in progress and application-wide budgets are enforced on the server. Without object storage the optimizer uses the standard upload below, and says so.
 - **Image Optimizer:** Sharp decodes uploads and produces bounded WebP, AVIF (only when the runtime encoder probe succeeds), JPEG, PNG, or source-format outputs. Input/output bytes, dimensions, processing time, and any negative savings are reported from real buffers. Animated sources are not silently flattened. Batches are concurrency-limited and constrained by actual request/artifact budgets.
 - **Font Optimizer:** PostCSS parses `@font-face` declarations, reports malformed rules and missing `font-display`, applies `auto`, `block`, `swap`, `fallback`, or `optional`, and offers the exact resulting stylesheet for copy/download.
-- **Asset Analyzer:** Reports measured image format, dimensions, and size, plus clearly labelled heuristic recommendations. CSS is routed through the font analysis workflow. It does not infer a file's rendered dimensions on a website.
-- **Website Performance Audit:** Fetches a public document and a bounded set of discovered resources with SSRF checks, redirects revalidated, response caps, and time budgets. PageSpeed lab/field metrics appear only when the provider returns them. This is not a browser-rendered crawl.
+- **Asset Analyzer:** Up to ten files per analysis. Reports measured image format, dimensions, and size, plus clearly labelled heuristic recommendations, and can hand all analysed images to the Image Optimizer in one step. CSS is routed through the font analysis workflow. It does not infer a file's rendered dimensions on a website.
+- **Website Performance Audit:** Fetches a public document and a bounded set of discovered resources with SSRF checks, redirects revalidated, response caps, and time budgets. It can inspect up to three pages: the given page and same-origin pages it links to, 25 resources per page, at most 1 MB per document and per resource, within a total byte budget and a time budget. PageSpeed lab/field metrics appear only when the provider returns them. This is not a browser-rendered crawl.
 - **History and Settings:** Mongoose persists session-owned jobs, binary artifacts, and preferences in MongoDB Atlas. History is not durable when the database is not configured; the UI labels that state and disables artifact downloads rather than pretending they work. A converted image that could not be stored is returned with the response instead, so it can still be saved from the open tab; it is labelled as not stored and is not listed in History.
 - **Appearance:** Light, Dark, and System themes with a pre-paint theme bootstrap, persistent choice, and reduced-motion support.
 
@@ -20,6 +21,8 @@ A smaller image is not proof of improved LCP, INP, or CLS. Savings shown by the 
 - Netlify adapter: `netlify/functions/api.ts` uses the documented `serverless-http` Express adapter. Netlify rewrites `/api/*` to this single function; the original `/api/...` path is retained for the existing Express routes.
 - Vercel adapter: `api/index.ts` exports the same Express app as a Vercel Function. `vercel.json` rewrites `/api/*` to it and falls back to `index.html` for client-side routes.
 - Database: MongoDB Atlas through Mongoose. The shared connection promise and warm-instance connection cache live in `src/server/db/mongo.ts`.
+- Object storage: a private Vercel Blob store behind `src/server/storage/objectStorage.ts`, for source uploads and generated files of the direct-upload pipeline. MongoDB keeps the records; the store keeps only bytes.
+- Background jobs: `src/server/pipeline/`. A job is a MongoDB record with a state and a lease; `worker.ts` claims and processes it, `cleanup.ts` applies retention and repairs interrupted work, `usage.ts` enforces quotas.
 - Image and CSS processing: Sharp with libvips; PostCSS.
 
 Both hosts are configured. A deployment that lacks its adapter serves the home page only: every `/api` request and every deep link gets the host's "not found" page. See "The API answers with a page instead of JSON" in [`docs/deployment.md`](docs/deployment.md).
@@ -73,11 +76,16 @@ npm run test:function
 npm run test:ui
 npm run test:dom
 npm run test:storage
+npm run test:pipeline
+npm run test:dom:direct
+npm run test:audit
 ```
 
 `test:function` exercises the real `serverless-http` handler with synthetic Netlify-style events, including the API path, cookies, JSON, Base64 multipart uploads, Sharp conversion, and safe errors. It intentionally refuses to run when `MONGODB_URI` or `MONGO_URL` is present and explicitly verifies the no-database state; it does **not** test Atlas persistence.
 
 `test:storage` makes MongoDB fail in each diagnosed way without needing a database, `test:ui` renders the image results panel for each outcome, and `test:dom` uses the real Image Optimizer screen in jsdom from upload to download. None of them tests real persistence; `npm run test:storage:mongo` does, against a disposable database (CI runs it against a `mongo:7` container).
+
+`test:pipeline` drives the direct-upload pipeline through the HTTP API on the local storage driver, and `test:dom:direct` drives the Image Optimizer screen in that mode. Both use MongoDB when `MONGODB_URI` names a throwaway database (CI does), and an in-memory stand-in otherwise. Neither exercises Vercel Blob itself. `test:audit` checks the website audit's limits without network, and `npm run bench:capacity` measures processing time and memory on the machine it runs on (results: [`docs/capacity-benchmark.md`](docs/capacity-benchmark.md)).
 
 `npm run smoke -- <base-url>` checks a deployed site from outside: the app, a deep link, the API, and one conversion with its download. It uploads one small generated image.
 

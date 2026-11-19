@@ -1,10 +1,15 @@
 import express, { type NextFunction, type Request as ExpressRequest, type Response as ExpressResponse } from "express";
 import path from "node:path";
+import { Readable } from "node:stream";
+import type { ReadableStream as NodeWebStream } from "node:stream/web";
 import sharp from "sharp";
 import { randomUUID } from "node:crypto";
 import { APP_NAME } from "./server/config/env.js";
 import { probeMongo } from "./server/db/mongo.js";
-import { jsonOk, route as routeWrapper } from "./server/http/handler.js";
+import { ApiError } from "./server/http/errors.js";
+import { STREAM_MARKER, jsonOk, route as routeWrapper, sessionFromCookieHeader } from "./server/http/handler.js";
+import { receiveLocalUpload } from "./server/pipeline/localUpload.js";
+import * as pipeline from "./server/routeHandlers/pipeline/routes.js";
 import { isValidRequestId, runWithRequestContext } from "./server/http/requestContext.js";
 import * as imageOptimize from "./server/routeHandlers/images/optimize/route.js";
 import * as imageBatch from "./server/routeHandlers/images/optimize/batch/route.js";
@@ -60,9 +65,35 @@ app.use((req, res, next) => {
   next();
 });
 
+// Upload target of the local storage driver (development and tests). It is
+// registered before the body parser on purpose: the file is streamed to disk
+// and never buffered. With any other driver the route answers 404, because
+// browsers then upload to the storage service, not to this server.
+app.put("/api/v1/uploads/:id/content", async (req, res) => {
+  const requestId = String(res.locals.requestId);
+  try {
+    const rawId = req.params.id;
+    const data = await receiveLocalUpload({
+      uploadId: Array.isArray(rawId) ? rawId[0] ?? "" : rawId,
+      sessionId: sessionFromCookieHeader(req.get("cookie")),
+      expires: Number(req.query.exp),
+      signature: typeof req.query.sig === "string" ? req.query.sig : "",
+      contentType: req.get("content-type") ?? "",
+      body: req,
+    });
+    res.status(200).json({ ok: true, data, meta: { requestId } });
+  } catch (error) {
+    req.resume();
+    const apiError = error instanceof ApiError ? error : new ApiError(500, "internal_error", "The request could not be completed.");
+    if (!(error instanceof ApiError)) console.error(`[api] request ${requestId} failed (${error instanceof Error ? error.name : "unknown error"})`);
+    res.status(apiError.status).json({ ok: false, error: { code: apiError.code, message: apiError.message, hint: apiError.hint }, meta: { requestId } });
+  }
+});
+
 // Netlify encodes binary function payloads as Base64 before invoking the
 // Function. Keep this raw-parser limit below its effective ~4.5 MB binary
 // request budget while preserving multipart boundaries for the Web Request API.
+// Large files never come this way: they are uploaded directly to object storage.
 app.use("/api", express.raw({ type: () => true, limit: "4.1mb" }));
 
 type WebHandler = (request: Request) => Promise<Response>;
@@ -114,9 +145,22 @@ function bridgeDynamic(handler: DynamicWebHandler) {
 }
 
 async function sendWebResponse(response: Response, res: ExpressResponse): Promise<void> {
-  response.headers.forEach((value, key) => res.setHeader(key, value));
+  const streamed = response.headers.get(STREAM_MARKER) === "1" && response.body !== null;
+  response.headers.forEach((value, key) => {
+    if (key !== STREAM_MARKER) res.setHeader(key, value);
+  });
   res.status(response.status);
   if (response.status === 204 || response.status === 304) { res.end(); return; }
+  if (streamed) {
+    // Large downloads are piped, chunk by chunk, from storage to the client.
+    // If the source fails part-way the connection is closed, so the client
+    // sees an incomplete download instead of a file that looks complete.
+    const source = Readable.fromWeb(response.body as unknown as NodeWebStream<Uint8Array>);
+    source.on("error", () => res.destroy());
+    res.on("close", () => source.destroy());
+    source.pipe(res);
+    return;
+  }
   const bytes = Buffer.from(await response.arrayBuffer());
   res.send(bytes);
 }
@@ -163,8 +207,24 @@ app.get("/api/v1/history", bridge(history.GET));
 app.delete("/api/v1/history", bridge(history.DELETE));
 app.get("/api/v1/history/:id", bridgeDynamic(historyDetail.GET));
 app.delete("/api/v1/history/:id", bridgeDynamic(historyDetail.DELETE));
-app.get("/api/v1/artifacts/:id", bridgeDynamic(artifact.GET));
+// Registered before the `:id` routes, so that "zip" is not read as an artifact ID.
+app.get("/api/v1/artifacts/zip", bridge(artifactZip.GET));
 app.post("/api/v1/artifacts/zip", bridge(artifactZip.POST));
+app.get("/api/v1/artifacts/:id/status", bridgeDynamic(pipeline.artifactStatus));
+app.get("/api/v1/artifacts/:id", bridgeDynamic(artifact.GET));
+// Direct-upload pipeline: jobs, uploads, usage.
+app.post("/api/v1/jobs/image-optimization", bridge(pipeline.createJob));
+app.get("/api/v1/jobs/:id", bridgeDynamic(pipeline.getJob));
+app.post("/api/v1/jobs/:id/cancel", bridgeDynamic(pipeline.cancelJob));
+app.post("/api/v1/jobs/:id/retry", bridgeDynamic(pipeline.retryJob));
+app.post("/api/v1/uploads/token", bridge(pipeline.uploadToken));
+app.post("/api/v1/uploads/complete", bridge(pipeline.uploadComplete));
+app.delete("/api/v1/uploads/:id", bridgeDynamic(pipeline.uploadDelete));
+app.get("/api/v1/usage", bridge(pipeline.usage));
+// Operator endpoints, protected by a bearer secret. The scheduler calls the first one.
+app.get("/api/v1/internal/cron", bridge(pipeline.cron));
+app.post("/api/v1/internal/cron", bridge(pipeline.cron));
+app.get("/api/v1/internal/usage", bridge(pipeline.adminUsage));
 app.get("/api/v1/limits", bridge(limitsRoute.GET));
 app.get("/api/v1/preferences", bridge(preferences.GET));
 app.put("/api/v1/preferences", bridge(preferences.PUT));
@@ -189,8 +249,19 @@ app.all("/api/v1/css/patch-font-display", methodNotAllowed(["POST"]));
 app.all("/api/v1/audits", methodNotAllowed(["POST"]));
 app.all("/api/v1/history", methodNotAllowed(["GET", "DELETE"]));
 app.all("/api/v1/history/:id", methodNotAllowed(["GET", "DELETE"]));
-app.all("/api/v1/artifacts/zip", methodNotAllowed(["POST"]));
+app.all("/api/v1/artifacts/zip", methodNotAllowed(["GET", "POST"]));
+app.all("/api/v1/artifacts/:id/status", methodNotAllowed(["GET"]));
 app.all("/api/v1/artifacts/:id", methodNotAllowed(["GET"]));
+app.all("/api/v1/jobs/image-optimization", methodNotAllowed(["POST"]));
+app.all("/api/v1/jobs/:id/cancel", methodNotAllowed(["POST"]));
+app.all("/api/v1/jobs/:id/retry", methodNotAllowed(["POST"]));
+app.all("/api/v1/jobs/:id", methodNotAllowed(["GET"]));
+app.all("/api/v1/uploads/token", methodNotAllowed(["POST"]));
+app.all("/api/v1/uploads/complete", methodNotAllowed(["POST"]));
+app.all("/api/v1/uploads/:id", methodNotAllowed(["DELETE"]));
+app.all("/api/v1/usage", methodNotAllowed(["GET"]));
+app.all("/api/v1/internal/cron", methodNotAllowed(["GET", "POST"]));
+app.all("/api/v1/internal/usage", methodNotAllowed(["GET"]));
 app.all("/api/v1/limits", methodNotAllowed(["GET"]));
 app.all("/api/v1/preferences", methodNotAllowed(["GET", "PUT"]));
 app.all("/api/v1/session", methodNotAllowed(["GET"]));

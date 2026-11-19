@@ -21,6 +21,8 @@ export type EvidenceKind = "measured" | "estimated" | "unavailable" | "not-appli
 
 export type AuditResource = {
   url: string;
+  /** The page whose HTML named this resource first. For a document, the document itself. */
+  page: string;
   kind: "document" | "image" | "stylesheet" | "font" | "script" | "other";
   origin: "document-html" | "stylesheet";
   status: number | null;
@@ -41,16 +43,37 @@ export type AuditFinding = {
   heuristic: boolean;
 };
 
+/** One inspected page: measurements of its initial HTML document. */
+export type AuditPage = {
+  url: string;
+  status: number;
+  contentType: string | null;
+  bytes: number;
+  title: string | null;
+  /** Resource URLs found in this page's HTML, before the per-page limit. */
+  resourcesFound: number;
+  /** Of those, how many were requested for this page. A resource shared with an earlier page is requested once. */
+  resourcesRequested: number;
+};
+
 export type AuditReport = {
   url: string;
   fetchedUrl: string;
   startedAt: string;
   durationMs: number;
   coverage: {
-    mode: "single-document";
+    mode: "single-document" | "multi-document";
     javascriptRendered: false;
     note: string;
+    pagesRequested: number;
+    pagesInspected: number;
+    /** The limits this audit ran under. */
+    limits: { maxPages: number; maxResourcesPerPage: number; maxDocumentBytes: number; maxResourceBytes: number; maxTotalBytes: number; timeBudgetMs: number; concurrency: number };
+    /** Limits that cut the audit short, in words. Empty when it ran to its end. */
+    stoppedBy: string[];
   };
+  /** Every inspected page, the requested one first. */
+  pages: AuditPage[];
   document: {
     status: number;
     contentType: string | null;
@@ -351,113 +374,190 @@ async function pagespeed(url: string, timeoutMs: number) {
   }
 }
 
-export async function runWebsiteAudit(rawUrl: string): Promise<AuditReport> {
+/** Fetches one public URL, with a size limit and a deadline. The default refuses private and reserved destinations. */
+export type AuditFetcher = (url: URL, maxBytes: number, deadline: number, reserveMs?: number) => Promise<{ status: number; contentType: string | null; body: Buffer; finalUrl: string }>;
+
+type Fetched = Awaited<ReturnType<AuditFetcher>>;
+type EntryDocument = { finalUrl: string; status: number; contentType: string | null; bytes: number; title: string | null };
+
+export type AuditOptions = {
+  /** Same-origin pages to inspect in addition to the requested one. Bounded by the configured page limit. */
+  extraPages?: number;
+  /**
+   * Replaces the network layer in tests. Production code never passes these:
+   * the defaults validate every destination, and every redirect, against
+   * private and reserved addresses.
+   */
+  fetcher?: AuditFetcher;
+  validateUrl?: (raw: string) => Promise<URL>;
+};
+
+/** Extensions that are never an HTML page, so a link to them is not followed as one. */
+const NOT_A_PAGE = /\.(avif|bmp|css|csv|docx?|gif|gz|ico|jpe?g|js|json|mjs|mp3|mp4|pdf|png|pptx?|rar|svg|tar|txt|webm|webp|woff2?|xlsx?|xml|zip)$/i;
+
+/** Runs `worker` over `items` with at most `limit` running at a time, keeping the results in order. */
+async function inParallel<T, R>(items: readonly T[], limit: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+      while (cursor < items.length) {
+        const index = cursor;
+        cursor += 1;
+        results[index] = await worker(items[index], index);
+      }
+    }),
+  );
+  return results;
+}
+
+/** Resource URLs named in a page's HTML, in document order, without duplicates. */
+function resourceUrls(root: ReturnType<typeof parseHtml>, base: URL): string[] {
+  const found = new Set<string>();
+  const push = (href: string | null) => {
+    if (!href) return;
+    try {
+      const resolved = new URL(href);
+      if (resolved.protocol === "http:" || resolved.protocol === "https:") found.add(resolved.href);
+    } catch {
+      /* not a URL */
+    }
+  };
+  const srcset = (value: string | undefined) => {
+    for (const part of (value ?? "").split(",")) push(abs(base, part.trim().split(/\s+/)[0]));
+  };
+  for (const img of root.querySelectorAll("img")) {
+    push(abs(base, img.getAttribute("src")));
+    srcset(img.getAttribute("srcset"));
+  }
+  for (const source of root.querySelectorAll("source")) {
+    push(abs(base, source.getAttribute("src")));
+    srcset(source.getAttribute("srcset"));
+  }
+  for (const link of root.querySelectorAll("link")) {
+    const rel = (link.getAttribute("rel") ?? "").toLowerCase();
+    if (rel.includes("stylesheet") || rel.includes("preload") || rel.includes("icon")) push(abs(base, link.getAttribute("href")));
+  }
+  for (const script of root.querySelectorAll("script[src]")) push(abs(base, script.getAttribute("src")));
+  return [...found];
+}
+
+/**
+ * Links on a page that lead to another page of the same origin, in document
+ * order, without duplicates. Only these are ever followed: the audit never
+ * leaves the origin it was pointed at.
+ */
+function sameOriginPages(root: ReturnType<typeof parseHtml>, base: URL): URL[] {
+  const self = `${base.pathname}${base.search}`;
+  const seen = new Set<string>([self]);
+  const pages: URL[] = [];
+  for (const anchor of root.querySelectorAll("a[href]")) {
+    const href = abs(base, anchor.getAttribute("href"));
+    if (!href) continue;
+    let target: URL;
+    try {
+      target = new URL(href);
+    } catch {
+      continue;
+    }
+    if (target.origin !== base.origin || (target.protocol !== "http:" && target.protocol !== "https:")) continue;
+    target.hash = "";
+    const key = `${target.pathname}${target.search}`;
+    if (seen.has(key) || NOT_A_PAGE.test(target.pathname)) continue;
+    seen.add(key);
+    pages.push(target);
+  }
+  return pages;
+}
+
+/**
+ * Inspects a public page, and optionally further pages of the same origin
+ * that it links to.
+ *
+ * It reads the initial HTML of each page and the resources that HTML names.
+ * It does not run JavaScript and does not crawl: at most the configured
+ * number of pages, one link away from the requested page, on its origin only.
+ * Everything is bounded: resources per page, bytes per document and per
+ * resource, bytes in total, requests in flight, and time.
+ */
+export async function runWebsiteAudit(rawUrl: string, options: AuditOptions = {}): Promise<AuditReport> {
   const started = Date.now();
   const deadline = started + limits.auditTotalTimeoutMs;
+  const fetcher = options.fetcher ?? fetchPublic;
   let url: URL;
   try {
-    url = await withinDeadline(validateAuditUrl(rawUrl), deadline);
+    url = await withinDeadline((options.validateUrl ?? validateAuditUrl)(rawUrl), deadline);
   } catch (error) {
     if (error instanceof Error && error.message === "AUDIT_TIMEOUT") {
       throw unprocessable("The website audit reached its overall time budget while resolving the page URL.", "Check the URL or retry later.");
     }
     throw error;
   }
-  const document = await fetchPublic(url, limits.auditMaxHtmlBytes, deadline);
-  if (document.status >= 400) {
-    throw unprocessable(`The page returned HTTP ${document.status}.`);
-  }
 
-  const html = document.body.toString("utf8");
-  const root = parseHtml(html);
-  const title = root.querySelector("title")?.text?.trim() || null;
-  const discovered = new Set<string>();
+  const pagesRequested = 1 + Math.max(0, Math.min(Math.floor(options.extraPages ?? 0), limits.auditMaxPages - 1));
+  const psiReserveMs = process.env.PAGESPEED_API_KEY ? limits.auditPageSpeedTimeoutMs : 0;
+  const timeLeft = (): number => deadline - Date.now() - psiReserveMs;
+  const stoppedBy = new Set<string>();
 
-  const pushUrl = (href: string | null) => {
-    if (!href) return;
+  // The total byte budget. A request reserves the most it may read before it
+  // starts and gives back what it did not use, so requests that run together
+  // can never read more than the budget between them. When less than a full
+  // allowance is free, a request waits for the others to finish and uses what
+  // is then left, so the budget is used up to what the resources' sizes allow.
+  let budgetLeft = limits.auditMaxTotalBytes;
+  let inFlight = 0;
+  const waiting: Array<() => void> = [];
+  const withBudget = async <T extends { body: Buffer }>(cap: number, request: (maxBytes: number) => Promise<T>): Promise<T | "no_budget"> => {
+    while (budgetLeft < cap && inFlight > 0) await new Promise<void>((resolve) => waiting.push(resolve));
+    if (budgetLeft <= 0) return "no_budget";
+    const allowance = Math.min(cap, budgetLeft);
+    budgetLeft -= allowance;
+    inFlight += 1;
     try {
-      const resolved = new URL(href);
-      if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return;
-      discovered.add(resolved.href);
-    } catch {
-      /* ignore */
+      const result = await request(allowance);
+      budgetLeft += allowance - result.body.byteLength;
+      return result;
+    } catch (error) {
+      if (error instanceof Error && error.message === "AUDIT_SIZE_LIMIT") {
+        // The response was cut off at the allowance, so up to that much was read: it stays spent.
+        // If the allowance was only what remained of the budget, the budget is what stopped it.
+        if (allowance < cap) return "no_budget";
+      } else {
+        budgetLeft += allowance;
+      }
+      throw error;
+    } finally {
+      inFlight -= 1;
+      for (const wake of waiting.splice(0)) wake();
     }
   };
 
-  for (const img of root.querySelectorAll("img")) {
-    pushUrl(abs(url, img.getAttribute("src")));
-    const srcset = img.getAttribute("srcset") ?? "";
-    for (const part of srcset.split(",")) pushUrl(abs(url, part.trim().split(/\s+/)[0]));
-  }
-  for (const source of root.querySelectorAll("source")) {
-    pushUrl(abs(url, source.getAttribute("src")));
-    const srcset = source.getAttribute("srcset") ?? "";
-    for (const part of srcset.split(",")) pushUrl(abs(url, part.trim().split(/\s+/)[0]));
-  }
-  for (const link of root.querySelectorAll("link")) {
-    const rel = (link.getAttribute("rel") ?? "").toLowerCase();
-    if (rel.includes("stylesheet") || rel.includes("preload") || rel.includes("icon")) {
-      pushUrl(abs(url, link.getAttribute("href")));
-    }
-  }
-  for (const script of root.querySelectorAll("script[src]")) {
-    pushUrl(abs(url, script.getAttribute("src")));
-  }
-
-  const resources: AuditResource[] = [
-    {
-      url: document.finalUrl,
-      kind: "document",
-      origin: "document-html",
-      status: document.status,
-      contentType: document.contentType,
-      transferredBytes: document.body.byteLength,
-      width: null,
-      height: null,
-    },
-  ];
-
+  const pages: AuditPage[] = [];
+  const resources: AuditResource[] = [];
   const findings: AuditFinding[] = [];
-  const queue = [...discovered].slice(0, limits.auditMaxResources);
-  const psiReserveMs = process.env.PAGESPEED_API_KEY ? limits.auditPageSpeedTimeoutMs : 0;
+  const requested = new Set<string>();
+  const skippedRow = (href: string, page: string, reason: string): AuditResource => ({
+    url: href, page, kind: classify(href, null), origin: "document-html", status: null, contentType: null, transferredBytes: null, width: null, height: null, skipped: reason,
+  });
 
-  for (let resourceIndex = 0; resourceIndex < queue.length; resourceIndex += 1) {
-    const href = queue[resourceIndex];
-    if (deadline - Date.now() <= psiReserveMs + 150) {
-      for (const remainingUrl of queue.slice(resourceIndex)) {
-        resources.push({
-          url: remainingUrl,
-          kind: classify(remainingUrl, null),
-          origin: "document-html",
-          status: null,
-          contentType: null,
-          transferredBytes: null,
-          width: null,
-          height: null,
-          skipped: "overall audit time budget reached",
-        });
-      }
-      break;
+  /** Requests one resource and measures it. Never throws: a failure becomes a row that says why. */
+  const inspect = async (href: string, page: string): Promise<AuditResource> => {
+    if (timeLeft() <= 150) {
+      stoppedBy.add("time budget");
+      return skippedRow(href, page, "overall audit time budget reached");
     }
     let parsed: URL;
     try {
       parsed = parseHttpUrl(href);
     } catch {
-      resources.push({
-        url: href,
-        kind: "other",
-        origin: "document-html",
-        status: null,
-        contentType: null,
-        transferredBytes: null,
-        width: null,
-        height: null,
-        skipped: "invalid URL",
-      });
-      continue;
+      return { ...skippedRow(href, page, "invalid URL"), kind: "other" };
     }
     try {
-      const fetched = await fetchPublic(parsed, limits.auditMaxResourceBytes, deadline, psiReserveMs);
+      const fetched = await withBudget(limits.auditMaxResourceBytes, (maxBytes) => fetcher(parsed, maxBytes, deadline, psiReserveMs));
+      if (fetched === "no_budget") {
+        stoppedBy.add("total byte budget");
+        return skippedRow(href, page, "total byte budget of the audit reached");
+      }
       const kind = classify(fetched.finalUrl, fetched.contentType);
       let width: number | null = null;
       let height: number | null = null;
@@ -484,17 +584,6 @@ export async function runWebsiteAudit(rawUrl: string): Promise<AuditReport> {
           finding = "Stylesheet could not be parsed.";
         }
       }
-      resources.push({
-        url: fetched.finalUrl,
-        kind,
-        origin: "document-html",
-        status: fetched.status,
-        contentType: fetched.contentType,
-        transferredBytes: fetched.body.byteLength,
-        width,
-        height,
-        finding,
-      });
       if (finding) {
         findings.push({
           id: crypto.randomUUID(),
@@ -508,59 +597,121 @@ export async function runWebsiteAudit(rawUrl: string): Promise<AuditReport> {
           heuristic: kind === "image",
         });
       }
+      return { url: fetched.finalUrl, page, kind, origin: "document-html", status: fetched.status, contentType: fetched.contentType, transferredBytes: fetched.body.byteLength, width, height, finding };
     } catch (error) {
-      resources.push({
-        url: href,
-        kind: classify(href, null),
-        origin: "document-html",
-        status: null,
-        contentType: null,
-        transferredBytes: null,
-        width: null,
-        height: null,
-        skipped: error instanceof Error ? error.message : "fetch failed",
-      });
+      return skippedRow(href, page, error instanceof Error ? error.message : "fetch failed");
     }
+  };
+
+  const queue: URL[] = [url];
+  let entry: EntryDocument | null = null;
+  let discoveredTotal = 0;
+
+  while (queue.length > 0 && pages.length < pagesRequested) {
+    const pageUrl = queue.shift() as URL;
+    const first: boolean = entry === null;
+    if (!first && timeLeft() <= 150) {
+      stoppedBy.add("time budget");
+      break;
+    }
+
+    let document: Fetched | "no_budget";
+    try {
+      document = await withBudget(limits.auditMaxHtmlBytes, (maxBytes) => fetcher(pageUrl, maxBytes, deadline, first ? 0 : psiReserveMs));
+    } catch (error) {
+      // The requested page failing is the audit failing. A further page failing is one row.
+      if (first) throw error;
+      resources.push({ ...skippedRow(pageUrl.href, pageUrl.href, error instanceof Error ? error.message : "fetch failed"), kind: "document" });
+      continue;
+    }
+    if (document === "no_budget") {
+      stoppedBy.add("total byte budget");
+      break;
+    }
+    if (first && document.status >= 400) throw unprocessable(`The page returned HTTP ${document.status}.`);
+    const finalUrl = new URL(document.finalUrl);
+    if (!first && (document.status >= 400 || finalUrl.origin !== new URL((entry as EntryDocument).finalUrl).origin)) {
+      resources.push({
+        ...skippedRow(document.finalUrl, document.finalUrl, document.status >= 400 ? `HTTP ${document.status}` : "redirected to another origin"),
+        kind: "document",
+        status: document.status,
+      });
+      continue;
+    }
+
+    const root = parseHtml(document.body.toString("utf8"));
+    const title = root.querySelector("title")?.text?.trim() || null;
+    if (first) {
+      entry = { finalUrl: document.finalUrl, status: document.status, contentType: document.contentType, bytes: document.body.byteLength, title };
+      // Further pages come from this page only, and only as many as were asked for.
+      queue.push(...sameOriginPages(root, finalUrl).slice(0, pagesRequested - 1));
+    }
+
+    // Relative URLs are resolved against the address the document was finally served from.
+    const named = resourceUrls(root, finalUrl);
+    discoveredTotal += named.length;
+    if (named.length > limits.auditMaxResources) stoppedBy.add("resources-per-page limit");
+    // A resource that an earlier page already named is not requested again.
+    const fresh = named.slice(0, limits.auditMaxResources).filter((href) => !requested.has(href));
+    for (const href of fresh) requested.add(href);
+
+    resources.push({ url: document.finalUrl, page: document.finalUrl, kind: "document", origin: "document-html", status: document.status, contentType: document.contentType, transferredBytes: document.body.byteLength, width: null, height: null });
+    resources.push(...(await inParallel(fresh, limits.auditConcurrency, (href) => inspect(href, document.finalUrl))));
+    pages.push({ url: document.finalUrl, status: document.status, contentType: document.contentType, bytes: document.body.byteLength, title, resourcesFound: named.length, resourcesRequested: fresh.length });
   }
 
+  if (entry === null) throw unprocessable("The page could not be read within the audit's limits.");
+  const requestedEntry = entry as EntryDocument;
   const ok = resources.filter((r) => r.status && r.status < 400);
   const transferred = ok.reduce((sum, r) => sum + (r.transferredBytes ?? 0), 0);
-  const psi = await pagespeed(document.finalUrl, deadline - Date.now());
+  const psi = await pagespeed(requestedEntry.finalUrl, deadline - Date.now());
+  const sum = (kind: AuditResource["kind"]): number => ok.filter((r) => r.kind === kind).reduce((total, r) => total + (r.transferredBytes ?? 0), 0);
 
   findings.unshift({
     id: "coverage",
     severity: "info",
-    title: "This is a document-level lab fetch, not a browser session.",
-    evidence: `HTML parsed for ${queue.length} discoverable URLs. JavaScript-inserted resources are not observed.`,
+    title: pages.length > 1 ? `This is a document-level lab fetch of ${pages.length} pages, not a browser session or a crawl.` : "This is a document-level lab fetch, not a browser session.",
+    evidence: `HTML of ${pages.length} page${pages.length === 1 ? "" : "s"} parsed for ${discoveredTotal} discoverable URLs. JavaScript-inserted resources are not observed.`,
     action: "Treat Core Web Vitals as unavailable unless PageSpeed Insights is configured.",
     heuristic: false,
   });
 
   return {
     url: url.href,
-    fetchedUrl: document.finalUrl,
+    fetchedUrl: requestedEntry.finalUrl,
     startedAt: new Date(started).toISOString(),
     durationMs: Date.now() - started,
     coverage: {
-      mode: "single-document",
+      mode: pages.length > 1 ? "multi-document" : "single-document",
       javascriptRendered: false,
-      note: "Assets listed in the initial HTML and same-document srcset/src/href. No headless Chrome, so client-rendered resources are out of scope.",
+      note:
+        pages.length > 1
+          ? "Assets listed in the initial HTML of the requested page and of same-origin pages it links to. No headless Chrome, so client-rendered resources are out of scope, and no page beyond those listed was visited."
+          : "Assets listed in the initial HTML and same-document srcset/src/href. No headless Chrome, so client-rendered resources are out of scope.",
+      pagesRequested,
+      pagesInspected: pages.length,
+      limits: {
+        maxPages: limits.auditMaxPages,
+        maxResourcesPerPage: limits.auditMaxResources,
+        maxDocumentBytes: limits.auditMaxHtmlBytes,
+        maxResourceBytes: limits.auditMaxResourceBytes,
+        maxTotalBytes: limits.auditMaxTotalBytes,
+        timeBudgetMs: limits.auditTotalTimeoutMs,
+        concurrency: limits.auditConcurrency,
+      },
+      stoppedBy: [...stoppedBy],
     },
-    document: {
-      status: document.status,
-      contentType: document.contentType,
-      bytes: document.body.byteLength,
-      title,
-    },
+    pages,
+    document: { status: requestedEntry.status, contentType: requestedEntry.contentType, bytes: requestedEntry.bytes, title: requestedEntry.title },
     resources,
     totals: {
       requestsAttempted: resources.length,
       requestsOk: ok.length,
       transferredBytes: transferred,
-      imageBytes: ok.filter((r) => r.kind === "image").reduce((s, r) => s + (r.transferredBytes ?? 0), 0),
-      fontBytes: ok.filter((r) => r.kind === "font").reduce((s, r) => s + (r.transferredBytes ?? 0), 0),
-      cssBytes: ok.filter((r) => r.kind === "stylesheet").reduce((s, r) => s + (r.transferredBytes ?? 0), 0),
-      scriptBytes: ok.filter((r) => r.kind === "script").reduce((s, r) => s + (r.transferredBytes ?? 0), 0),
+      imageBytes: sum("image"),
+      fontBytes: sum("font"),
+      cssBytes: sum("stylesheet"),
+      scriptBytes: sum("script"),
     },
     findings,
     pagespeed: psi,

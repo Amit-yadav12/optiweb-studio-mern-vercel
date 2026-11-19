@@ -7,6 +7,7 @@ import type { Tone } from "@/lib/status";
 import { Field, Select } from "@/components/ui/Form";
 import { DefinitionRow, Panel, PanelHeader, StatStrip } from "@/components/ui/Layout";
 import { ApiClientError, api, artifactUrl } from "@/lib/api-client";
+import { useServerLimits } from "@/lib/limits";
 import { formatBytes, formatNumber } from "@/lib/format";
 import type { CssAnalysis, CssPatchResponse, CssFinding, FontDisplayPolicy } from "@/types/domain";
 import { SAMPLE_CSS } from "@/features/fonts/sampleCss";
@@ -43,6 +44,9 @@ const POLICIES: Record<FontDisplayPolicy, PolicyInfo> = {
 
 export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPolicy }) {
   const { push } = useToast();
+  // The size limit is the server's. Until it is known, nothing is refused here; the server still enforces it.
+  const { limits: serverLimits, known: limitsKnown } = useServerLimits();
+  const maxCssChars = limitsKnown ? serverLimits.maxCssChars ?? null : null;
   const [css, setCss] = useState("");
   const [policy, setPolicy] = useState<FontDisplayPolicy>(initialPolicy);
   const [analysis, setAnalysis] = useState<CssAnalysis | null>(null);
@@ -198,8 +202,8 @@ export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPol
                       const file = event.target.files?.[0];
                       event.target.value = "";
                       if (!file) return;
-                      if (file.size > 400_000) {
-                        push({ tone: "warn", title: "File too large", description: "Stylesheets are limited to 400,000 characters." });
+                      if (maxCssChars !== null && file.size > maxCssChars) {
+                        push({ tone: "warn", title: "File too large", description: `Stylesheets are limited to ${maxCssChars.toLocaleString("en-US")} characters.` });
                         return;
                       }
                       updateCss(await file.text());

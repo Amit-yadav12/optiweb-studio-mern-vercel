@@ -3,14 +3,16 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ArrowRight, FileCode2, Globe, ImageDown, Search, ScanSearch } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/WorkspaceShell";
 import { Button, ButtonLink } from "@/components/ui/Button";
-import { EmptyState, ErrorState, ProgressIndicator, StatusBadge } from "@/components/ui/Feedback";
+import { EmptyState, ErrorState, Notice, ProgressIndicator, StatusBadge } from "@/components/ui/Feedback";
 import { PageHeader, Panel, PanelHeader, StatStrip, TableShell, Td, Th } from "@/components/ui/Layout";
 import { ImageOptimizer } from "@/features/images/ImageOptimizer";
 import { FontOptimizer } from "@/features/fonts/FontOptimizer";
 import { AssetAnalyzer } from "@/features/assets/AssetAnalyzer";
 import { WebsiteAudit } from "@/features/audit/WebsiteAudit";
 import { SettingsForm } from "@/features/settings/SettingsForm";
+import { StorageUsageDetails, StorageUsagePanel } from "@/features/usage/StorageUsage";
 import { ApiClientError, api } from "@/lib/api-client";
+import { useServerLimits, wholeMb } from "@/lib/limits";
 import { formatBytes, formatNumber, formatRelativeTime } from "@/lib/format";
 import { statusToneFor } from "@/lib/status";
 import type { HistoryEntry, HistoryPage as HistoryPageData, Preferences } from "@/types/domain";
@@ -20,13 +22,21 @@ const FALLBACK_PREFS: Preferences = {
   fontDisplayPolicy: "swap", analyzerThresholdKb: 300, reduceMotion: false, updatedAt: null,
 };
 
-type LimitsResponse = { maxFileBytes: number; maxFilesPerRequest: number; maxDecodedPixels: number; artifactTtlHours: number; avifSupported: boolean };
-
 function useLimits() {
-  const [limits, setLimits] = useState<LimitsResponse>({ maxFileBytes: 1_000_000, maxFilesPerRequest: 4, maxDecodedPixels: 24_000_000, artifactTtlHours: 720, avifSupported: false });
-  useEffect(() => { api.get<LimitsResponse>("/api/v1/limits").then(setLimits).catch(() => undefined); }, []);
-  return limits;
+  return useServerLimits().limits;
 }
+
+const MB = 1024 * 1024;
+
+/** Why large uploads are not in use, in words for the person running the deployment. */
+const DIRECT_UNAVAILABLE: Record<string, string> = {
+  storage_not_configured: "Object storage is not connected to this deployment.",
+  storage_disabled: "Object storage is switched off on this deployment.",
+  storage_unsupported_host: "This host cannot stream large files.",
+  storage_local_dir_missing: "The local storage directory is not configured.",
+  database_not_configured: "The database is not configured on this deployment.",
+  database_unavailable: "The database cannot be reached right now.",
+};
 
 function usePreferences() {
   const [prefs, setPrefs] = useState<Preferences>(FALLBACK_PREFS);
@@ -47,8 +57,42 @@ function PageFrame({ title, context, eyebrow, description, maxWidth = "max-w-6xl
 
 export function ImagePage() {
   const limits = useLimits();
-  return <PageFrame title="Image Optimizer" context="Convert, compress and compare — measured from real output" eyebrow="Tool" description="Reduce image weight while preserving the visual quality you need." actions={<ButtonLink href="/app/history" variant="secondary" size="sm">Past results</ButtonLink>}>
-    <ImageOptimizer limits={{ maxFileMb: Math.max(1, Math.floor(limits.maxFileBytes / 1024 / 1024)), maxFiles: limits.maxFilesPerRequest, maxDecodedPixels: limits.maxDecodedPixels, avifSupported: limits.avifSupported }} />
+  const image = limits.image;
+  const direct = image?.mode === "direct";
+  const [usageTick, setUsageTick] = useState(0);
+  const optimizerLimits = image
+    ? {
+        mode: image.mode,
+        maxFileMb: wholeMb(image.maxFileBytes),
+        maxFiles: image.maxFiles,
+        maxBatchMb: Math.round((image.maxBatchBytes / MB) * 10) / 10,
+        maxDecodedPixels: image.maxDecodedPixels,
+        avifSupported: limits.avifSupported,
+        sourceTtlHours: image.sourceTtlHours,
+        artifactTtlHours: image.artifactTtlHours,
+      }
+    : {
+        mode: "request" as const,
+        maxFileMb: wholeMb(limits.maxFileBytes),
+        maxFiles: limits.maxFilesPerRequest,
+        maxBatchMb: limits.maxBatchBytes ? Math.round((limits.maxBatchBytes / MB) * 10) / 10 : undefined,
+        maxDecodedPixels: limits.maxDecodedPixels,
+        avifSupported: limits.avifSupported,
+      };
+  return <PageFrame title="Image Optimizer" context="Convert, compress and compare — measured from real output" eyebrow="Tool" description="Reduce image weight while preserving the visual quality you need." actions={<ButtonLink href="/app/history" variant="secondary" size="sm">History</ButtonLink>}>
+    {image && !direct && image.directUnavailableReason ? (
+      <Notice tone="neutral" title={`Standard uploads: up to ${wholeMb(image.maxFileBytes)} MB per file, ${image.maxFiles} files per batch`}>
+        Larger files need direct uploads to object storage, which are not in use here: {DIRECT_UNAVAILABLE[image.directUnavailableReason] ?? "they are not available on this deployment."}
+      </Notice>
+    ) : null}
+    <ImageOptimizer limits={optimizerLimits} onJobSettled={() => setUsageTick((value) => value + 1)} />
+    {direct ? <StorageUsagePanel refreshKey={usageTick} /> : null}
+  </PageFrame>;
+}
+
+export function UsagePage() {
+  return <PageFrame title="Storage" context="What this session keeps on the server" eyebrow="Records" description="See how much of your storage quota is in use, what expires soon, and free space when you need it." maxWidth="max-w-5xl" actions={<ButtonLink href="/app/images" variant="primary" size="sm" leading={<ImageDown className="size-3.5" />}>New optimization</ButtonLink>}>
+    <StorageUsageDetails />
   </PageFrame>;
 }
 
@@ -63,7 +107,7 @@ export function AssetsPage() {
   const limits = useLimits();
   const prefs = usePreferences();
   return <PageFrame title="Asset Analyzer" context="Evidence-based diagnostics for uploaded files" eyebrow="Diagnostic" description="Inspect image weight, dimensions and CSS font-loading gaps before converting anything." maxWidth="max-w-5xl">
-    <AssetAnalyzer defaults={{ thresholdKb: prefs.analyzerThresholdKb, maxFileMb: Math.max(1, Math.floor(limits.maxFileBytes / 1024 / 1024)), maxFiles: limits.maxFilesPerRequest }} />
+    <AssetAnalyzer defaults={{ thresholdKb: prefs.analyzerThresholdKb, maxFileMb: wholeMb(limits.maxFileBytes), maxFiles: limits.maxAssetFiles ?? limits.maxFilesPerRequest, maxBatchMb: limits.maxBatchBytes ? Math.round((limits.maxBatchBytes / MB) * 10) / 10 : undefined }} />
   </PageFrame>;
 }
 
@@ -153,7 +197,7 @@ export function HistoryPage() {
       <div className="grid gap-3 md:grid-cols-[minmax(220px,1fr)_180px_180px_auto] md:items-end">
         <div><label className="mb-1.5 block text-xs font-medium text-ink-soft" htmlFor="history-search">Search jobs</label><div className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted" /><input id="history-search" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applyFilters(); }} placeholder="Search by job name" className="h-10 w-full border border-line-strong bg-surface pl-9 pr-3 text-sm text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15" /></div></div>
         <div><label className="mb-1.5 block text-xs font-medium text-ink-soft" htmlFor="history-kind">Job type</label><select id="history-kind" value={kind} onChange={(event) => setKind(event.target.value)} className="h-10 w-full border border-line-strong bg-surface px-3 text-sm text-ink"><option value="all">All types</option><option value="image.optimize">Images</option><option value="css.font-display">CSS</option><option value="asset.analyze">Analysis</option><option value="site.audit">Audit</option></select></div>
-        <div><label className="mb-1.5 block text-xs font-medium text-ink-soft" htmlFor="history-status">Status</label><select id="history-status" value={status} onChange={(event) => setStatus(event.target.value)} className="h-10 w-full border border-line-strong bg-surface px-3 text-sm text-ink"><option value="all">All statuses</option><option value="completed">Completed</option><option value="partial">Partial</option><option value="failed">Failed</option></select></div>
+        <div><label className="mb-1.5 block text-xs font-medium text-ink-soft" htmlFor="history-status">Status</label><select id="history-status" value={status} onChange={(event) => setStatus(event.target.value)} className="h-10 w-full border border-line-strong bg-surface px-3 text-sm text-ink"><option value="all">All statuses</option><option value="completed">Completed</option><option value="partial">Partial</option><option value="failed">Failed</option><option value="processing">Processing</option><option value="queued">Queued</option><option value="cancelled">Cancelled</option></select></div>
         <Button variant="primary" onClick={applyFilters}>Apply</Button>
       </div>
       <div className="mt-5">{error ? <ErrorState title="Could not load history" message={error} hint={hint ?? undefined} /> : busy ? <ProgressIndicator label="Loading history…" /> : data?.entries.length ? <HistoryTable entries={data.entries} /> : <EmptyState title="Nothing matches these filters" description="Try another search or run a new optimization." action={<ButtonLink href="/app/images" variant="secondary" size="sm">Optimize an image</ButtonLink>} />}</div>
@@ -166,6 +210,13 @@ export function HistoryDetailPage() {
   const { id = "" } = useParams();
   const [data, setData] = useState<{ job: { id: string; kind: string; status: string; label: string; fileCount: number; inputBytes: number; outputBytes: number; savedBytes: number; note: string | null; createdAt: string }; items: Array<{ id: string; filename: string; outputFilename: string | null; status: string; inputBytes: number; outputBytes: number; savedBytes: number; outputFormat: string | null; message: string | null; hasArtifact: boolean }> } | null>(null);
   const [error, setError] = useState<string | null>(null); const [hint, setHint] = useState<string | null>(null); const [busy, setBusy] = useState(true);
+  // A background job that is still running is read again every few seconds, until it has finished.
+  const running = data !== null && ["created", "uploading", "uploaded", "queued", "processing"].includes(data.job.status);
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => { api.get<typeof data>(`/api/v1/history/${id}`).then(setData).catch(() => undefined); }, 3000);
+    return () => window.clearInterval(timer);
+  }, [id, running]);
   useEffect(() => { let active = true; setBusy(true); api.get<typeof data>(`/api/v1/history/${id}`).then((result) => { if (active) setData(result); }).catch((err) => { if (active) { setError(err instanceof Error ? err.message : "Could not load job."); setHint(hintOf(err)); } }).finally(() => { if (active) setBusy(false); }); return () => { active = false; }; }, [id]);
   const remove = async () => { if (!window.confirm("Delete this job and its stored artifacts?")) return; try { await api.del(`/api/v1/history/${id}`); window.location.href = "/app/history"; } catch (err) { setError(err instanceof Error ? err.message : "Could not delete job."); setHint(hintOf(err)); } };
   return <PageFrame title="Job details" context="Stored optimization record" eyebrow="History" description="Inspect the metadata and artifact availability recorded for this job." maxWidth="max-w-5xl" actions={<ButtonLink href="/app/history" variant="secondary" size="sm">Back to history</ButtonLink>}>

@@ -71,6 +71,29 @@ Per-file failures never abort the batch; `status: "partial"` summarises them.
 
 A converted file has exactly one of two downloads. When the job was stored (`persisted: true`), `artifactId` names the stored file. When it was not, `artifactId` is null and `inlineOutput` holds the file itself, Base64-encoded, with `bytes` equal to `outputBytes`; the server keeps no copy. One response carries at most 3 MB of such files (`OW_MAX_INLINE_MB` can lower this). A file beyond that has `inlineOutput: null` and `inlineSkipped: "too_large"`. See "Storage diagnostics" in `deployment.md` for the `storage` categories.
 
+### Direct uploads and background jobs
+
+Available when `GET /api/v1/limits` reports `image.mode: "direct"`. Otherwise these endpoints answer 503 `direct_uploads_unavailable`. Every endpoint acts on the session in the request's cookie only; an ID that belongs to another session answers 404.
+
+| Endpoint | Purpose | Success |
+| --- | --- | --- |
+| `POST /api/v1/jobs/image-optimization` | Admit a job. Body: `{ files: [{ name, type, size }], settings?, idempotencyKey? }`. Checks count, sizes, types, quota and job slots; reserves the storage. Nothing is uploaded yet. | 201, or 200 with `replayed: true` when the idempotency key (body, or `Idempotency-Key` header) was used before |
+| `POST /api/v1/uploads/token` | Body `{ uploadId }` (an item ID of the job). Returns what the browser needs to upload that one file to storage: a client token bound to a server-generated path, the declared size and content type, valid for 20 minutes. Can be requested again to retry an upload. | 200 |
+| `POST /api/v1/uploads/complete` | Body `{ uploadId }`. The server looks the object up in storage, compares its size with the declared size and checks its file signature; a file that fails is deleted. Repeating the call changes nothing. | 202 when this confirmation queued the job, else 200 |
+| `DELETE /api/v1/uploads/:id` | Remove a file from a job that is still uploading. | 200 |
+| `GET /api/v1/jobs/:id` | The job: `state`, real counts (`awaitingUpload`, `waiting`, `processing`, `completed`, `failed`, `cancelled`), totals over converted files, and each file with its result or error. No percentage is reported. | 200 |
+| `POST /api/v1/jobs/:id/cancel` | Stop the job. A job that no worker holds is cancelled at once; otherwise the worker stops after the file in progress. Converted files stay available. | 200 |
+| `POST /api/v1/jobs/:id/retry` | Run the failed files again whose failure was temporary and whose source is still stored. | 202 |
+| `GET /api/v1/artifacts/:id/status` | `available` or `expired`, with size and expiry, without downloading. | 200 |
+| `GET /api/v1/artifacts/zip?ids=a,b,c` | The same ZIP as the POST form, as a plain link; streamed. | 200 |
+| `GET /api/v1/usage` | The session's storage use, quota, jobs in progress, files expiring soon, recent jobs, retention periods. | 200 |
+
+Job states: `created` → `uploading` → `uploaded` → `queued` → `processing` → `completed` | `partial` | `failed`, and `cancelled` from any state before the end.
+
+Errors use the common envelope. Codes specific to this pipeline: 403 `quota_exceeded`, 409 `conflict` (for example, confirming a file that has not arrived), 413 `payload_too_large` and `too_many_files`, 415 `unsupported_media_type`, 429 `too_many_active_jobs` and `rate_limited`, 503 `capacity_exhausted`, `direct_uploads_unavailable` and `storage_unavailable`.
+
+`GET /api/v1/artifacts/:id` serves a file from object storage as a stream, with `Content-Length`, to the session that owns it. `GET /api/v1/limits` carries `image` (the limits of the mode in effect) and `advancedCapacity`.
+
 ### POST /api/v1/css/analyze
 
 Body `{ "css": string }` (≤ 400k chars). Returns counts of `@font-face` rules, how many declare

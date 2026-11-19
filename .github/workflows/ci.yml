@@ -86,6 +86,37 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run test:storage
 
+      - name: Website audit limits against a made-up site (no network)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:audit
+
+      # The direct-upload pipeline, through the HTTP API, on the local storage
+      # driver. First with an in-memory stand-in for the database, which checks
+      # the application logic; then against MongoDB, which checks the queries.
+      - name: Direct-upload pipeline (in-memory database stand-in)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:pipeline
+
+      - name: Direct-upload pipeline against an isolated MongoDB
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_pipeline_${{ github.run_id }}_${{ github.run_attempt }}
+          NODE_ENV: test
+        run: npm run test:pipeline
+
+      # The Image Optimizer screen in direct-upload mode, in a DOM, against the
+      # same API: choose files, upload, follow the job, download.
+      - name: Direct-upload screen in a DOM (in-memory database stand-in)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:dom:direct
+
+      - name: Direct-upload screen in a DOM against an isolated MongoDB
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_screen_${{ github.run_id }}_${{ github.run_attempt }}
+          NODE_ENV: test
+        run: npm run test:dom:direct
+
       - name: Persistence, rollback and credential checks against an isolated MongoDB
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
@@ -99,6 +130,10 @@ jobs:
           MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_${{ github.run_id }}_${{ github.run_attempt }}
           NODE_ENV: test
           PORT: "5000"
+          # The server runs with object storage on local disk, so that direct
+          # uploads and background jobs are in effect, as they are with Vercel Blob.
+          OW_STORAGE_DRIVER: local
+          OW_LOCAL_STORAGE_DIR: ${{ runner.temp }}/optiweb-objects
         run: |
           npm start > server.log 2>&1 &
           SERVER_PID=$!
@@ -111,13 +146,37 @@ jobs:
           node scripts/api-selftest.mjs http://127.0.0.1:5000
           STATUS=$?
           # The check that the production job runs, here against a server with a
-          # database: the converted file is stored and downloaded by its URL.
+          # database and object storage: a standard upload is stored and
+          # downloaded by its URL, and a background job runs end to end.
           node scripts/deployed-smoke.mjs http://127.0.0.1:5000 --expect-build
           SMOKE=$?
           set -e
           echo "----- server log -----"
           cat server.log
           if [ "$STATUS" -ne 0 ] || [ "$SMOKE" -ne 0 ]; then exit 1; fi
+
+  # Processing time and memory at the configured limits, on this runner. Takes
+  # several minutes, so it runs only when asked for: start the workflow by
+  # hand, or put [bench] in a commit message.
+  capacity:
+    name: Capacity benchmark
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[bench]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: optiweb-studio-mern-vercel/.nvmrc
+          cache: npm
+          cache-dependency-path: optiweb-studio-mern-vercel/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run the benchmark
+        run: npm run bench:capacity
 
   production:
     name: Production serves this build and converts an image

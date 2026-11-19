@@ -3,11 +3,13 @@ import { readMultipart } from "../../../http/multipart.js";
 import { analyzeAssets } from "../../../services/assetService.js";
 import { persistJob, storageOutcome } from "../../../services/storageService.js";
 import { badRequest } from "../../../http/errors.js";
+import { limits } from "../../../config/env.js";
 
 
 /** POST /api/v1/assets/analyze — diagnostics for the exact files you upload. */
 export const POST = route(async (req, ctx) => {
-  const { files, fields } = await readMultipart(req, { kind: "asset" });
+  // Up to ten files per analysis. Their combined size is bounded by the request budget.
+  const { files, fields } = await readMultipart(req, { kind: "asset", maxFiles: limits.maxAssetFiles });
 
   const thresholdKbRaw = Number(fields.thresholdKb);
   const thresholdKb = Number.isFinite(thresholdKbRaw) && thresholdKbRaw >= 50 ? Math.min(thresholdKbRaw, 10_000) : 300;
