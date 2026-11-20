@@ -48,6 +48,19 @@ const { check, section, note } = checker;
 const root = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Waits for something that happens a moment after its cause, and says whether
+ * it happened within `timeout`. A fixed pause would be a guess at how fast the
+ * machine is.
+ */
+const settles = async (condition, timeout = 5_000) => {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    if (await condition()) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(25);
+  }
+};
 
 if (!existsSync(join(root, "dist/index.html"))) {
   console.error("dist/ is missing. Run `npm run build` first: this test drives the production build.");
@@ -302,6 +315,19 @@ try {
     return match ? Number(match[1]) * { B: 1, KB: 1024, MB: 1024 * 1024 }[match[2]] : null;
   };
 
+  /**
+   * A full browser shows the page's icon and reads its manifest, and asks for
+   * them again by itself when the address changes. Such a request is a plain GET
+   * for a file that index.html names. It can arrive a moment after the click
+   * that changed the address, inside a later measurement, and says nothing
+   * about what the app does. A headless shell never makes it.
+   */
+  const FURNITURE = /^\/(favicon\.svg|icons\/[\w.-]+|site\.webmanifest)$/;
+  const isFurniture = (entry) => entry.method === "GET" && entry.bodyBytes === 0 && entry.declaredLength === 0 && entry.query === "" && entry.refused === null && FURNITURE.test(entry.path);
+  /** The requests since `mark`, the browser's own fetches of the page's icon and manifest aside. */
+  const caused = (mark) => proxy.since(mark).filter((entry) => !isFurniture(entry));
+  const listed = (entries) => entries.map((entry) => `${entry.method} ${entry.path || entry.url}`).join(", ");
+
   /** Asserts that the traffic in a window was only this app fetching its own static files. */
   const ASSET_PATH = /^\/(assets\/[\w.-]+|theme\.js|favicon\.svg|site\.webmanifest|icons\/[\w.-]+|og-image\.png|robots\.txt|app(\/[a-z]+)?)?$/;
   function onlyStaticGets(entries) {
@@ -336,7 +362,7 @@ try {
   await waitChecked(tab);
   let rows = await queue(tab);
   check("the file is accepted after a check of its contents", rows.length === 1 && rows[0].status === "ready" && rows[0].text.includes("JPEG") && rows[0].text.includes("800 × 600"), JSON.stringify(rows));
-  check("selecting and checking the file caused no request at all", proxy.since(p1Mark).length === 0, proxy.since(p1Mark).map((entry) => `${entry.method} ${entry.path}`).join(", "));
+  check("selecting and checking the file caused no request at all", caused(p1Mark).length === 0, listed(caused(p1Mark)));
   await optimize(tab);
   let table = await results(tab);
   check("the file was converted to WebP", table.length === 1 && table[0].format === "WebP" && table[0].kind === "smaller", JSON.stringify(table));
@@ -356,7 +382,7 @@ try {
   await choose(tab, "Output format", "JPEG");
   const silentMark = proxy.mark();
   await optimize(tab);
-  check("a second run causes no request of any kind", proxy.since(silentMark).length === 0, proxy.since(silentMark).map((entry) => `${entry.method} ${entry.path}`).join(", "));
+  check("a second run causes no request of any kind", caused(silentMark).length === 0, listed(caused(silentMark)));
 
   /* ======================================================================= */
   section("P4 · Every output is a real file of the chosen format · P5 · The sizes shown are real");
@@ -405,7 +431,7 @@ try {
   check("two images were converted to AVIF while every request would have been refused", table.length === 2 && table.every((row) => row.format === "AVIF"), JSON.stringify(table));
   const offlineFile = await saveRow(tab, table[0].output);
   check("the result made offline is a real AVIF", readImageHeader(new Uint8Array(offlineFile.bytes))?.format === "avif");
-  check("the browser did not even try to reach the network", proxy.since(offlineMark).length === 0, proxy.since(offlineMark).map((entry) => `${entry.method} ${entry.path}`).join(", "));
+  check("the browser did not even try to reach the network", proxy.since(offlineMark).length === 0, listed(proxy.since(offlineMark)));
   proxy.setOffline(false);
 
   /* ======================================================================= */
@@ -682,7 +708,7 @@ try {
   check("previews are shown through blob: URLs while results are on screen", beforeClear.live > 0, `${beforeClear.live} live`);
   check("previews are limited to a few at a time, however many results there are", await tab.evaluate(() => document.querySelectorAll('[data-testid="review"] article').length) === 6);
   await startOver(tab);
-  await sleep(100);
+  await settles(async () => (await probe(tab)).live === 0);
   const afterClear = await probe(tab);
   check("clearing the results releases every blob: URL", afterClear.live === 0, `${afterClear.live} still live of ${afterClear.created} created`);
   // Leave the page with results on screen: the same must hold.
@@ -692,10 +718,13 @@ try {
   check("a result is on screen again, with live previews", (await probe(tab)).live > 0);
   await tab.click('a[href="/app/fonts"]');
   await tab.waitForFunction(() => document.body.innerText.includes("Stylesheet input"));
-  await sleep(150);
+  // The browser stops a worker a moment after the page tells it to. The check
+  // waits for that, and fails if a worker is still running after five seconds.
+  const workersGone = await settles(() => tab.workers().length === 0);
+  await settles(async () => (await probe(tab)).live === 0);
   const afterLeave = await probe(tab);
   check("leaving the page releases every blob: URL", afterLeave.live === 0, `${afterLeave.live} still live`);
-  check("leaving the page terminates every worker it started", afterLeave.workersTerminated === afterLeave.workersCreated && tab.workers().length === 0, `${afterLeave.workersTerminated} of ${afterLeave.workersCreated} terminated, ${tab.workers().length} alive`);
+  check("leaving the page terminates every worker it started", afterLeave.workersTerminated === afterLeave.workersCreated && workersGone, `the page terminated ${afterLeave.workersTerminated} of ${afterLeave.workersCreated}; ${tab.workers().length} still running after 5 seconds`);
   const stored = await tab.evaluate(async () => ({
     cookie: document.cookie,
     local: Object.keys(localStorage),
@@ -723,7 +752,7 @@ try {
   const patchedText = patched.bytes.toString("utf8");
   check("the downloaded stylesheet has font-display: swap in the rule that lacked it", /src: url\("\/fonts\/a\.woff2"\) format\("woff2"\);\n\s*font-display: swap/.test(patchedText), patchedText);
   check("the rule that already had a value keeps it, and the other rules are unchanged", patchedText.includes("font-display: optional;") && patchedText.includes(`.title { font-family: "${secret}", sans-serif; }`) && (patchedText.match(/font-display/g) ?? []).length === 2);
-  check("analysing and patching caused no request", proxy.since(cssMark).length === 0, proxy.since(cssMark).map((entry) => `${entry.method} ${entry.path}`).join(", "));
+  check("analysing and patching caused no request", caused(cssMark).length === 0, listed(caused(cssMark)));
   check("the stylesheet's contents appear in nothing the browser sent", !sent(proxy.log).includes(secret));
   check("the draft is kept in sessionStorage only, so it is gone when the tab closes", await tab.evaluate(() => Object.keys(sessionStorage).join() === "unikit:css-draft" && Object.keys(localStorage).length === 0));
 
@@ -740,7 +769,7 @@ try {
   check("the stylesheet's missing font-display is found", finding("site.css").codes.includes("font-display-missing"), JSON.stringify(finding("site.css")));
   check("an animated PNG is reported as animated", finding("animation.png").codes.includes("animated"));
   check("a text file with an image's name is reported as not recognised", finding("text-named.jpg").codes.includes("unrecognised"));
-  check("analysing five files caused no request", proxy.since(assetMark).length === 0, proxy.since(assetMark).map((entry) => `${entry.method} ${entry.path}`).join(", "));
+  check("analysing five files caused no request", caused(assetMark).length === 0, listed(caused(assetMark)));
   check('the summary states what was sent to a server: "0 B"', await tab.evaluate(() => document.querySelector('[data-testid="asset-results"]').innerText.replace(/\s+/g, " ").toLowerCase().includes("sent to a server 0 b")));
   // Hand a file to the Image Optimizer: it travels in memory.
   const handMark = proxy.mark();
@@ -749,7 +778,9 @@ try {
   await waitChecked(tab);
   rows = await queue(tab);
   check("the file arrives in the Image Optimizer's queue without being selected again", rows.length === 1 && rows[0].name === canaryName && rows[0].status === "ready", JSON.stringify(rows));
-  check("the hand-over caused no request", proxy.since(handMark).length === 0);
+  // The hand-over changes the address, so a full browser may fetch the page's icon again here.
+  check("the hand-over caused no request", caused(handMark).length === 0, listed(caused(handMark)));
+  const handFurniture = proxy.since(handMark).filter(isFurniture);
 
   section("P12d · Website Audit: the one request with a body carries a URL and nothing else");
   await tab.click('a[href="/app/audit"]');
@@ -758,9 +789,9 @@ try {
   await setInput(tab, "#audit-url", "http://127.0.0.1:9/private");
   await clickButton(tab, "Run audit");
   await tab.waitForFunction(() => document.body.innerText.includes("Audit not completed"), { timeout: 30_000 });
-  const auditTraffic = proxy.since(auditMark);
+  const auditTraffic = caused(auditMark);
   const auditRequest = auditTraffic[0];
-  check("the audit made exactly one request: POST /api/v1/audits", auditTraffic.length === 1 && auditRequest.method === "POST" && auditRequest.path === "/api/v1/audits", auditTraffic.map((entry) => `${entry.method} ${entry.path}`).join(", "));
+  check("the audit made exactly one request: POST /api/v1/audits", auditTraffic.length === 1 && auditRequest.method === "POST" && auditRequest.path === "/api/v1/audits", listed(auditTraffic));
   check("its body is the URL and the page count as JSON, and nothing else", auditRequest.body.toString("utf8") === '{"url":"http://127.0.0.1:9/private","extraPages":0}' && auditRequest.contentType === "application/json", auditRequest.body.toString("utf8"));
   check("the server refuses a private address, and the page says why", auditRequest.status === 400 && (await tab.evaluate(() => /private|loopback|not allowed|public/i.test(document.body.innerText))), String(auditRequest.status));
   const bodies = proxy.log.filter((entry) => entry.bodyBytes > 0 || entry.declaredLength > 0);
@@ -831,7 +862,7 @@ try {
   await tab.waitForFunction(() => localStorage.getItem("unikit:preferences") !== null);
   const savedSettings = await tab.evaluate(() => JSON.parse(localStorage.getItem("unikit:preferences")));
   check("saving writes the settings to localStorage", savedSettings.defaultImageFormat === "avif" && savedSettings.defaultStrategy === "no-regression" && savedSettings.defaultMaxWidth === 1600, JSON.stringify(savedSettings));
-  check("saving sends nothing to the server", proxy.since(settingsMark).length === 0, proxy.since(settingsMark).map((entry) => `${entry.method} ${entry.path}`).join(", "));
+  check("saving sends nothing to the server", caused(settingsMark).length === 0, listed(caused(settingsMark)));
   await tab.click('a[href="/app/images"]');
   await tab.waitForFunction(() => document.body.innerText.includes("1 · Select images"));
   const applied = await tab.evaluate(() => ({ strategy: document.querySelector('[aria-label="Optimization strategy"] [aria-checked="true"]')?.textContent.trim(), width: document.querySelector("#maxWidth")?.value }));
@@ -867,8 +898,8 @@ try {
   rows = await queue(tab);
   check("a dropped file is queued and identified by its contents, whatever type the browser reported", rows.some((entry) => entry.name === "dropped.png" && entry.status === "ready" && entry.text.includes("PNG")), JSON.stringify(rows));
   await selectFiles(tab, [fixturePath("lossy-400x300.webp")]);
-  await sleep(200);
-  check("selecting a file that is already queued does not add it twice", (await queue(tab)).filter((entry) => entry.name === "lossy-400x300.webp").length === 1 && (await tab.evaluate(() => document.body.innerText.includes("already in the queue"))));
+  const toldSo = await settles(() => tab.evaluate(() => document.body.innerText.includes("already in the queue")));
+  check("selecting a file that is already queued does not add it twice, and says so", (await queue(tab)).filter((entry) => entry.name === "lossy-400x300.webp").length === 1 && toldSo);
   await tab.close();
 
   /* ======================================================================= */
@@ -936,7 +967,10 @@ try {
   const uploads = proxy.log.filter((entry) => /multipart|octet-stream|image\//i.test(entry.contentType ?? ""));
   check(`request bodies in the whole session: ${totalSent} bytes, all of them the audit's JSON`, totalSent === auditRequest.body.length && totalSent < 100);
   check("no request declared a file-like content type", uploads.length === 0, uploads.map((entry) => entry.contentType).join(", "));
-  const sessionSummary = `${proxy.log.length} requests by the app, ${proxy.log.filter((entry) => entry.method === "GET").length} of them GET; ${totalSent} bytes of request body in total`;
+  const gets = proxy.log.filter((entry) => entry.method === "GET");
+  const furniture = gets.filter(isFurniture);
+  const sessionSummary = `${proxy.log.length} requests in the app's browser context, ${gets.length} of them GET (${furniture.length} for the page's icon and manifest); ${totalSent} bytes of request body in total`;
+  if (handFurniture.length > 0) note(`While a file was handed from the Asset Analyzer to the Image Optimizer, the browser fetched ${listed(handFurniture)}: the page's own icon or manifest, for the new address.`);
 
   /* ======================================================================= */
   section("The record itself: it would have shown a request to another host");
