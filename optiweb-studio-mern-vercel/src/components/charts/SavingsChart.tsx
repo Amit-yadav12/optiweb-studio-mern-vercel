@@ -19,7 +19,7 @@ export function SavingsChart({ rows, max }: { rows: ChartRow[]; max?: number }) 
             <span key={tick} className="w-px bg-line" style={{ height: "100%" }} />
           ))}
         </div>
-        <div className="flex justify-between pr-0.5 pb-1.5 font-mono text-2xs text-faint tnum" aria-hidden>
+        <div className="flex justify-between pr-0.5 pb-1.5 font-mono text-2xs text-muted tnum" aria-hidden>
           {[0, 0.25, 0.5, 0.75, 1].map((tick) => (
             <span key={tick}>{formatBytes(peak * tick)}</span>
           ))}

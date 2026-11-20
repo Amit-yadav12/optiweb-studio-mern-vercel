@@ -67,7 +67,7 @@ export function Select({
       <svg
         aria-hidden
         viewBox="0 0 12 12"
-        className="pointer-events-none absolute top-1/2 right-2.5 size-3 -translate-y-1/2 text-faint"
+        className="pointer-events-none absolute top-1/2 right-2.5 size-3 -translate-y-1/2 text-muted"
       >
         <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
       </svg>
@@ -105,7 +105,7 @@ export function SegmentedControl<T extends string>({
   name: string;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="inline-flex rounded-md border border-line-strong bg-surface-sunken p-0.5">
+    <div role="radiogroup" aria-label={label} className="inline-flex w-fit max-w-full flex-wrap rounded-md border border-line-strong bg-surface-sunken p-0.5">
       {options.map((option) => {
         const selected = option.value === value;
         return (

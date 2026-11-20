@@ -5,11 +5,11 @@ export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 export type ButtonSize = "sm" | "md" | "lg";
 
 const BASE =
-  "inline-flex items-center justify-center gap-2 rounded-md border font-medium transition-[background-color,border-color,color,box-shadow,transform] duration-150 ease-out select-none disabled:cursor-not-allowed disabled:opacity-55 active:translate-y-[0.5px]";
+  "inline-flex items-center justify-center gap-2 rounded-md border font-medium whitespace-nowrap transition-[background-color,border-color,color,box-shadow,transform] duration-150 ease-out select-none disabled:cursor-not-allowed disabled:opacity-55 active:translate-y-[0.5px]";
 
 const VARIANTS: Record<ButtonVariant, string> = {
   primary:
-    "border-accent bg-accent text-white hover:bg-accent-hover hover:border-accent-hover shadow-[0_1px_2px_rgba(23,33,43,0.16)]",
+    "border-accent bg-accent text-on-accent hover:bg-accent-hover hover:border-accent-hover shadow-[0_1px_2px_rgba(23,33,43,0.16)]",
   secondary: "border-line-strong bg-surface text-ink hover:bg-surface-sunken hover:border-faint",
   ghost: "border-transparent bg-transparent text-ink-soft hover:bg-surface-sunken hover:text-ink",
   danger: "border-danger-border bg-danger-soft text-danger hover:brightness-95",

@@ -1,238 +1,199 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
-import { ArrowRight, FileCode2, Globe, ImageDown, Search, ScanSearch } from "lucide-react";
+import { useEffect, type ReactNode } from "react";
+import { Link } from "react-router-dom";
+import { ArrowRight, FileCode2, Globe, ImageDown, ScanSearch, ShieldCheck } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/WorkspaceShell";
-import { Button, ButtonLink } from "@/components/ui/Button";
-import { EmptyState, ErrorState, Notice, ProgressIndicator, StatusBadge } from "@/components/ui/Feedback";
-import { PageHeader, Panel, PanelHeader, StatStrip, TableShell, Td, Th } from "@/components/ui/Layout";
+import { ButtonLink } from "@/components/ui/Button";
+import { PageHeader, Panel, PanelHeader, StatStrip } from "@/components/ui/Layout";
 import { ImageOptimizer } from "@/features/images/ImageOptimizer";
 import { FontOptimizer } from "@/features/fonts/FontOptimizer";
 import { AssetAnalyzer } from "@/features/assets/AssetAnalyzer";
 import { WebsiteAudit } from "@/features/audit/WebsiteAudit";
 import { SettingsForm } from "@/features/settings/SettingsForm";
-import { StorageUsageDetails, StorageUsagePanel } from "@/features/usage/StorageUsage";
-import { ApiClientError, api } from "@/lib/api-client";
-import { useServerLimits, wholeMb } from "@/lib/limits";
-import { formatBytes, formatNumber, formatRelativeTime } from "@/lib/format";
-import { statusToneFor } from "@/lib/status";
-import type { HistoryEntry, HistoryPage as HistoryPageData, Preferences } from "@/types/domain";
-
-const FALLBACK_PREFS: Preferences = {
-  defaultImageFormat: "webp", defaultQuality: 78, defaultMaxWidth: null,
-  fontDisplayPolicy: "swap", analyzerThresholdKb: 300, reduceMotion: false, updatedAt: null,
-};
-
-function useLimits() {
-  return useServerLimits().limits;
-}
-
-const MB = 1024 * 1024;
-
-/** Why large uploads are not in use, in words for the person running the deployment. */
-const DIRECT_UNAVAILABLE: Record<string, string> = {
-  storage_not_configured: "Object storage is not connected to this deployment.",
-  storage_disabled: "Object storage is switched off on this deployment.",
-  storage_unsupported_host: "This host cannot stream large files.",
-  storage_local_dir_missing: "The local storage directory is not configured.",
-  database_not_configured: "The database is not configured on this deployment.",
-  database_unavailable: "The database cannot be reached right now.",
-};
-
-function usePreferences() {
-  const [prefs, setPrefs] = useState<Preferences>(FALLBACK_PREFS);
-  useEffect(() => { api.get<Preferences>("/api/v1/preferences").then(setPrefs).catch(() => undefined); }, []);
-  return prefs;
-}
+import { formatBytes, formatNumber, formatSavingsPercent } from "@/lib/format";
+import { usePreferences } from "@/lib/preferences";
+import { useSessionActivity } from "@/lib/session-activity";
 
 function PageFrame({ title, context, eyebrow, description, maxWidth = "max-w-6xl", actions, children }: {
   title: string; context: string; eyebrow: string; description: string; maxWidth?: string; actions?: ReactNode; children: ReactNode;
 }) {
-  return <WorkspaceShell title={title} context={context} actions={actions}>
-    <div className={`mx-auto flex ${maxWidth} flex-col gap-6`}>
-      <PageHeader eyebrow={eyebrow} title={title} description={description} />
-      {children}
-    </div>
-  </WorkspaceShell>;
+  return (
+    <WorkspaceShell title={title} context={context} actions={actions}>
+      <div className={`mx-auto flex ${maxWidth} flex-col gap-6`}>
+        <PageHeader eyebrow={eyebrow} title={title} description={description} />
+        {children}
+      </div>
+    </WorkspaceShell>
+  );
 }
 
 export function ImagePage() {
-  const limits = useLimits();
-  const image = limits.image;
-  const direct = image?.mode === "direct";
-  const [usageTick, setUsageTick] = useState(0);
-  const optimizerLimits = image
-    ? {
-        mode: image.mode,
-        maxFileMb: wholeMb(image.maxFileBytes),
-        maxFiles: image.maxFiles,
-        maxBatchMb: Math.round((image.maxBatchBytes / MB) * 10) / 10,
-        maxDecodedPixels: image.maxDecodedPixels,
-        avifSupported: limits.avifSupported,
-        sourceTtlHours: image.sourceTtlHours,
-        artifactTtlHours: image.artifactTtlHours,
-      }
-    : {
-        mode: "request" as const,
-        maxFileMb: wholeMb(limits.maxFileBytes),
-        maxFiles: limits.maxFilesPerRequest,
-        maxBatchMb: limits.maxBatchBytes ? Math.round((limits.maxBatchBytes / MB) * 10) / 10 : undefined,
-        maxDecodedPixels: limits.maxDecodedPixels,
-        avifSupported: limits.avifSupported,
-      };
-  return <PageFrame title="Image Optimizer" context="Convert, compress and compare — measured from real output" eyebrow="Tool" description="Reduce image weight while preserving the visual quality you need." actions={<ButtonLink href="/app/history" variant="secondary" size="sm">History</ButtonLink>}>
-    {image && !direct && image.directUnavailableReason ? (
-      <Notice tone="neutral" title={`Standard uploads: up to ${wholeMb(image.maxFileBytes)} MB per file, ${image.maxFiles} files per batch`}>
-        Larger files need direct uploads to object storage, which are not in use here: {DIRECT_UNAVAILABLE[image.directUnavailableReason] ?? "they are not available on this deployment."}
-      </Notice>
-    ) : null}
-    <ImageOptimizer limits={optimizerLimits} onJobSettled={() => setUsageTick((value) => value + 1)} />
-    {direct ? <StorageUsagePanel refreshKey={usageTick} /> : null}
-  </PageFrame>;
-}
-
-export function UsagePage() {
-  return <PageFrame title="Storage" context="What this session keeps on the server" eyebrow="Records" description="See how much of your storage quota is in use, what expires soon, and free space when you need it." maxWidth="max-w-5xl" actions={<ButtonLink href="/app/images" variant="primary" size="sm" leading={<ImageDown className="size-3.5" />}>New optimization</ButtonLink>}>
-    <StorageUsageDetails />
-  </PageFrame>;
+  return (
+    <PageFrame
+      title="Image Optimizer"
+      context="Convert, compress and compare, inside this browser tab"
+      eyebrow="Tool"
+      description="Reduce image weight while keeping the visual quality you need. Your images are processed on this device and are not uploaded."
+      actions={<ButtonLink href="/app/assets" variant="secondary" size="sm">Analyze first</ButtonLink>}
+    >
+      <ImageOptimizer />
+    </PageFrame>
+  );
 }
 
 export function FontsPage() {
-  const prefs = usePreferences();
-  return <PageFrame title="Font Optimizer" context="PostCSS analysis and safe font-display patching" eyebrow="Tool" description="Find @font-face rules that lack font-display, review the exact changes, and download the patched stylesheet." maxWidth="max-w-7xl">
-    <FontOptimizer initialPolicy={prefs.fontDisplayPolicy} />
-  </PageFrame>;
+  const preferences = usePreferences();
+  return (
+    <PageFrame
+      title="Font Optimizer"
+      context="PostCSS analysis and safe font-display patching, in this browser"
+      eyebrow="Tool"
+      description="Find @font-face rules that lack font-display, review the exact changes, and download the patched stylesheet."
+    >
+      <FontOptimizer initialPolicy={preferences.fontDisplayPolicy} />
+    </PageFrame>
+  );
 }
 
 export function AssetsPage() {
-  const limits = useLimits();
-  const prefs = usePreferences();
-  return <PageFrame title="Asset Analyzer" context="Evidence-based diagnostics for uploaded files" eyebrow="Diagnostic" description="Inspect image weight, dimensions and CSS font-loading gaps before converting anything." maxWidth="max-w-5xl">
-    <AssetAnalyzer defaults={{ thresholdKb: prefs.analyzerThresholdKb, maxFileMb: wholeMb(limits.maxFileBytes), maxFiles: limits.maxAssetFiles ?? limits.maxFilesPerRequest, maxBatchMb: limits.maxBatchBytes ? Math.round((limits.maxBatchBytes / MB) * 10) / 10 : undefined }} />
-  </PageFrame>;
+  const preferences = usePreferences();
+  return (
+    <PageFrame
+      title="Asset Analyzer"
+      context="Evidence-based diagnostics for files on this device"
+      eyebrow="Diagnostic"
+      description="Inspect image weight, dimensions, metadata and CSS font-loading gaps before converting anything."
+    >
+      <AssetAnalyzer thresholdKb={preferences.analyzerThresholdKb} />
+    </PageFrame>
+  );
 }
 
 export function AuditPage() {
-  return <PageFrame title="Website Performance Audit" context="Document-level inspection of a public URL" eyebrow="Lab measurement" description="Inspect a public page and discover linked resources. Browser-rendered and field metrics are only included when the configured provider supplies them.">
-    <WebsiteAudit />
-  </PageFrame>;
+  return (
+    <PageFrame
+      title="Website Performance Audit"
+      context="Document-level inspection of a public URL"
+      eyebrow="Lab measurement"
+      description="Inspect a public page and the resources it names. Browser-rendered and field metrics are reported only when a real measurement source provides them."
+    >
+      <WebsiteAudit />
+    </PageFrame>
+  );
 }
 
 export function SettingsPage() {
-  const prefs = usePreferences();
-  return <PageFrame title="Settings" context="Guest session preferences" eyebrow="Preferences" description="Choose optimizer defaults and review the limits enforced by this deployment." maxWidth="max-w-5xl">
-    <SettingsForm defaults={prefs} />
-  </PageFrame>;
+  return (
+    <PageFrame title="Settings" context="Kept in this browser" eyebrow="Preferences" description="Choose the defaults the tools start from. Settings are stored in this browser only." maxWidth="max-w-5xl">
+      <SettingsForm />
+    </PageFrame>
+  );
 }
 
-/** The API's own hint for an error. For a storage failure it names the actual cause and the fix. */
-const hintOf = (err: unknown): string | null => (err instanceof ApiClientError ? err.hint ?? null : null);
-
-function useHistoryData(query: string) {
-  const [data, setData] = useState<(HistoryPageData & { summary?: { jobs: number; savedBytes: number; inputBytes: number; files: number; completed: number } }) | null>(null);
-  const [busy, setBusy] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [hint, setHint] = useState<string | null>(null);
-  const load = useCallback(async () => {
-    setBusy(true); setError(null); setHint(null);
-    try { setData(await api.get(`/api/v1/history${query ? `?${query}` : ""}`)); }
-    catch (err) { setError(err instanceof Error ? err.message : "History could not be loaded."); setHint(hintOf(err)); }
-    finally { setBusy(false); }
-  }, [query]);
-  useEffect(() => { void load(); }, [load]);
-  return { data, busy, error, hint, reload: load };
-}
-
-const KIND_LABEL: Record<string, string> = { "image.optimize": "Images", "css.font-display": "CSS", "asset.analyze": "Analysis", "site.audit": "Audit" };
-const KIND_ICON: Record<string, typeof ImageDown> = { "image.optimize": ImageDown, "css.font-display": FileCode2, "asset.analyze": ScanSearch, "site.audit": Globe };
+const TOOLS = [
+  { title: "Image Optimizer", desc: "Convert to WebP, AVIF, JPEG or PNG and compare real output bytes.", href: "/app/images", icon: ImageDown, where: "runs in this browser" },
+  { title: "Font Optimizer", desc: "Find and patch @font-face rules that lack font-display.", href: "/app/fonts", icon: FileCode2, where: "runs in this browser" },
+  { title: "Asset Analyzer", desc: "Read dimensions, weight and metadata from file headers.", href: "/app/assets", icon: ScanSearch, where: "runs in this browser" },
+  { title: "Website Audit", desc: "Inspect a public page and the assets it names.", href: "/app/audit", icon: Globe, where: "the server fetches the URL" },
+] as const;
 
 export function OverviewPage() {
-  const { data, busy, error, hint } = useHistoryData("page=1&pageSize=6");
-  const summary = data?.summary;
-  return <WorkspaceShell title="Overview" context="Your optimization workspace" actions={<ButtonLink href="/app/images" variant="primary" size="sm" leading={<ImageDown className="size-3.5" />}>New optimization</ButtonLink>}>
-    <div className="mx-auto flex max-w-6xl flex-col gap-6">
-      <PageHeader eyebrow="Workspace" title="Make every byte count." description="A focused workspace for image conversion, font-loading checks, and evidence-based asset diagnostics." />
-      <div className="grid gap-3 md:grid-cols-3">
-        {[{ title: "Image Optimizer", desc: "Convert and compare real output bytes.", href: "/app/images", icon: ImageDown }, { title: "Font Optimizer", desc: "Inspect and patch font-display rules.", href: "/app/fonts", icon: FileCode2 }, { title: "Website Audit", desc: "Inspect discoverable assets on a public page.", href: "/app/audit", icon: Globe }].map((item) => <Link key={item.href} to={item.href} className="group border border-line bg-surface p-5 transition-all duration-200 hover:-translate-y-0.5 hover:border-accent-border hover:shadow-raise focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
-          <div className="flex items-center justify-between"><span className="grid size-10 place-items-center border border-line bg-surface-sunken text-accent"><item.icon className="size-5" /></span><ArrowRight className="size-4 text-muted transition-transform group-hover:translate-x-0.5" /></div>
-          <h2 className="mt-4 text-base font-semibold text-ink">{item.title}</h2><p className="mt-1 text-sm leading-relaxed text-muted">{item.desc}</p>
-        </Link>)}
+  const activity = useSessionActivity();
+  const images = activity.images;
+  const used = images.runs + activity.fonts.runs + activity.assets.runs + activity.audit.runs > 0;
+  const saved = images.inputBytes - images.outputBytes;
+  return (
+    <WorkspaceShell title="Overview" context="Web-asset tools that run in your browser" actions={<ButtonLink href="/app/images" variant="primary" size="sm" leading={<ImageDown className="size-3.5" aria-hidden />}>Optimize images</ButtonLink>}>
+      <div className="mx-auto flex max-w-6xl flex-col gap-6">
+        <PageHeader eyebrow="Workspace" title="Your files stay on this device." description="Image conversion, font-loading checks and asset diagnostics, carried out by your browser. Nothing you select is uploaded." />
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {TOOLS.map((item) => (
+            <Link key={item.href} to={item.href} className="group border border-line bg-surface p-5 transition-colors hover:border-accent-border hover:bg-surface-sunken/40">
+              <div className="flex items-center justify-between">
+                <span className="grid size-10 place-items-center border border-line bg-surface-sunken text-accent">
+                  <item.icon className="size-5" aria-hidden />
+                </span>
+                <ArrowRight className="size-4 text-faint transition-transform group-hover:translate-x-0.5 group-hover:text-accent" aria-hidden />
+              </div>
+              <h2 className="mt-4 text-base font-semibold text-ink">{item.title}</h2>
+              <p className="mt-1 text-sm leading-relaxed text-muted">{item.desc}</p>
+              <p className="mt-3 font-mono text-2xs tracking-wide text-muted uppercase">{item.where}</p>
+            </Link>
+          ))}
+        </div>
+
+        <Panel labelledBy="how-it-works">
+          <div className="flex gap-3.5">
+            <span className="grid size-9 shrink-0 place-items-center rounded-md border border-line bg-surface-sunken text-accent">
+              <ShieldCheck className="size-4" aria-hidden />
+            </span>
+            <div className="min-w-0">
+              <h2 id="how-it-works" className="text-sm font-semibold text-ink">How your files are handled</h2>
+              <ol className="mt-2 grid gap-3 text-xs leading-relaxed text-muted md:grid-cols-3">
+                <li><span className="font-medium text-ink">1. You select a file.</span> The browser gives this page access to it. The page checks its contents and reads its header.</li>
+                <li><span className="font-medium text-ink">2. The browser does the work.</span> Decoding, resizing, encoding and CSS parsing run on this device, in a Web Worker of this tab.</li>
+                <li><span className="font-medium text-ink">3. You save the result.</span> It is written from this tab's memory to your downloads. Leaving the page discards everything.</li>
+              </ol>
+              <p className="mt-3 max-w-3xl text-xs leading-relaxed text-muted">
+                The server behind this site has no endpoint that accepts a file, no database and no file storage, and the site sets no cookies. Only the
+                Website Audit talks to the server: it sends the URL you ask it to inspect.
+              </p>
+            </div>
+          </div>
+        </Panel>
+
+        <Panel labelledBy="this-visit">
+          <PanelHeader id="this-visit" title="This visit" description="Counted in this tab since the page was loaded. Nothing is recorded: a reload starts again from zero." />
+          <StatStrip
+            items={[
+              { label: "Images processed", value: formatNumber(images.items), hint: `${images.runs} run${images.runs === 1 ? "" : "s"}` },
+              { label: "Bytes saved", value: images.items > 0 ? formatBytes(saved) : "—", hint: images.inputBytes > 0 ? formatSavingsPercent(Math.round((saved / images.inputBytes) * 1000) / 10) : "measured from real output" },
+              { label: "Stylesheets and files analysed", value: formatNumber(activity.fonts.items + activity.assets.items) },
+              { label: "Pages audited", value: formatNumber(activity.audit.items) },
+            ]}
+          />
+          {!used ? <p className="mt-4 text-sm text-muted">Nothing yet. Start with a tool above.</p> : null}
+        </Panel>
       </div>
-      <Panel>
-        <PanelHeader title="Your activity" description="Metrics are based on jobs stored in this browser session." actions={<ButtonLink href="/app/history" variant="secondary" size="sm">View history</ButtonLink>} />
-        {error ? <ErrorState title="History unavailable" message={error} hint={hint ?? "The other tools still work without History."} /> : busy ? <ProgressIndicator label="Loading your session history…" /> : <>
-          <StatStrip items={[{ label: "Jobs", value: formatNumber(summary?.jobs ?? 0) }, { label: "Files", value: formatNumber(summary?.files ?? 0) }, { label: "Bytes saved", value: formatBytes(summary?.savedBytes ?? 0) }]} />
-          {data?.entries.length ? <div className="mt-5"><HistoryTable entries={data.entries} /></div> : <div className="mt-5"><EmptyState title="No optimization jobs yet" description="Your completed image, CSS, asset, and audit jobs will appear here." action={<ButtonLink href="/app/images" variant="primary" size="sm">Optimize your first image</ButtonLink>} /></div>}
-        </>}
-      </Panel>
-    </div>
-  </WorkspaceShell>;
-}
-
-function HistoryTable({ entries }: { entries: HistoryEntry[] }) {
-  return <TableShell>
-    <thead><tr><Th>Job</Th><Th>Type</Th><Th>Status</Th><Th>Created</Th><Th numeric>Saved</Th><Th /></tr></thead>
-    <tbody>{entries.map((entry) => { const Icon = KIND_ICON[entry.kind] ?? FileCode2; return <tr key={entry.id}>
-      <Td><Link to={`/app/history/${entry.id}`} className="flex items-center gap-2 font-medium text-ink hover:text-accent"><Icon className="size-4 shrink-0 text-muted" /><span className="truncate">{entry.label}</span></Link></Td>
-      <Td>{KIND_LABEL[entry.kind] ?? entry.kind}</Td><Td><StatusBadge tone={statusToneFor(entry.status)}>{entry.status}</StatusBadge></Td>
-      <Td>{formatRelativeTime(entry.createdAt)}</Td><Td numeric><span className={entry.savedBytes > 0 ? "text-ok" : "text-muted"}>{formatBytes(entry.savedBytes)}</span></Td><Td><Link className="text-xs font-medium text-accent hover:underline" to={`/app/history/${entry.id}`}>Details</Link></Td>
-    </tr>; })}</tbody>
-  </TableShell>;
-}
-
-export function HistoryPage() {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [search, setSearch] = useState(searchParams.get("q") ?? "");
-  const [kind, setKind] = useState(searchParams.get("kind") ?? "all");
-  const [status, setStatus] = useState(searchParams.get("status") ?? "all");
-  const query = new URLSearchParams();
-  if (searchParams.get("q")) query.set("q", searchParams.get("q")!);
-  if (kind !== "all") query.set("kind", kind);
-  if (status !== "all") query.set("status", status);
-  query.set("page", searchParams.get("page") ?? "1"); query.set("pageSize", "10");
-  const { data, busy, error, hint, reload } = useHistoryData(query.toString());
-  const applyFilters = () => setSearchParams((previous) => { const next = new URLSearchParams(previous); if (search.trim()) next.set("q", search.trim()); else next.delete("q"); if (kind !== "all") next.set("kind", kind); else next.delete("kind"); if (status !== "all") next.set("status", status); else next.delete("status"); next.delete("page"); return next; });
-  const clear = async () => { if (!window.confirm("Clear all history and stored artifacts for this session? This cannot be undone.")) return; try { await api.del("/api/v1/history"); await reload(); } catch (err) { window.alert(err instanceof Error ? err.message : "History could not be cleared."); } };
-  return <PageFrame title="History" context="Previously completed jobs in this session" eyebrow="Records" description="Search and review measured results from your optimization jobs." maxWidth="max-w-7xl" actions={<Button variant="secondary" size="sm" onClick={clear}>Clear history</Button>}>
-    <Panel>
-      <div className="grid gap-3 md:grid-cols-[minmax(220px,1fr)_180px_180px_auto] md:items-end">
-        <div><label className="mb-1.5 block text-xs font-medium text-ink-soft" htmlFor="history-search">Search jobs</label><div className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted" /><input id="history-search" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applyFilters(); }} placeholder="Search by job name" className="h-10 w-full border border-line-strong bg-surface pl-9 pr-3 text-sm text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15" /></div></div>
-        <div><label className="mb-1.5 block text-xs font-medium text-ink-soft" htmlFor="history-kind">Job type</label><select id="history-kind" value={kind} onChange={(event) => setKind(event.target.value)} className="h-10 w-full border border-line-strong bg-surface px-3 text-sm text-ink"><option value="all">All types</option><option value="image.optimize">Images</option><option value="css.font-display">CSS</option><option value="asset.analyze">Analysis</option><option value="site.audit">Audit</option></select></div>
-        <div><label className="mb-1.5 block text-xs font-medium text-ink-soft" htmlFor="history-status">Status</label><select id="history-status" value={status} onChange={(event) => setStatus(event.target.value)} className="h-10 w-full border border-line-strong bg-surface px-3 text-sm text-ink"><option value="all">All statuses</option><option value="completed">Completed</option><option value="partial">Partial</option><option value="failed">Failed</option><option value="processing">Processing</option><option value="queued">Queued</option><option value="cancelled">Cancelled</option></select></div>
-        <Button variant="primary" onClick={applyFilters}>Apply</Button>
-      </div>
-      <div className="mt-5">{error ? <ErrorState title="Could not load history" message={error} hint={hint ?? undefined} /> : busy ? <ProgressIndicator label="Loading history…" /> : data?.entries.length ? <HistoryTable entries={data.entries} /> : <EmptyState title="Nothing matches these filters" description="Try another search or run a new optimization." action={<ButtonLink href="/app/images" variant="secondary" size="sm">Optimize an image</ButtonLink>} />}</div>
-      {data && data.pageCount > 1 ? <div className="mt-4 flex items-center justify-between border-t border-line pt-4"><span className="text-xs text-muted">Page {data.page} of {data.pageCount} · {data.total} jobs</span><div className="flex gap-2"><Button disabled={data.page <= 1} variant="secondary" size="sm" onClick={() => setSearchParams((old) => { const p = new URLSearchParams(old); p.set("page", String(data.page - 1)); return p; })}>Previous</Button><Button disabled={data.page >= data.pageCount} variant="secondary" size="sm" onClick={() => setSearchParams((old) => { const p = new URLSearchParams(old); p.set("page", String(data.page + 1)); return p; })}>Next</Button></div></div> : null}
-    </Panel>
-  </PageFrame>;
-}
-
-export function HistoryDetailPage() {
-  const { id = "" } = useParams();
-  const [data, setData] = useState<{ job: { id: string; kind: string; status: string; label: string; fileCount: number; inputBytes: number; outputBytes: number; savedBytes: number; note: string | null; createdAt: string }; items: Array<{ id: string; filename: string; outputFilename: string | null; status: string; inputBytes: number; outputBytes: number; savedBytes: number; outputFormat: string | null; message: string | null; hasArtifact: boolean }> } | null>(null);
-  const [error, setError] = useState<string | null>(null); const [hint, setHint] = useState<string | null>(null); const [busy, setBusy] = useState(true);
-  // A background job that is still running is read again every few seconds, until it has finished.
-  const running = data !== null && ["created", "uploading", "uploaded", "queued", "processing"].includes(data.job.status);
-  useEffect(() => {
-    if (!running) return;
-    const timer = window.setInterval(() => { api.get<typeof data>(`/api/v1/history/${id}`).then(setData).catch(() => undefined); }, 3000);
-    return () => window.clearInterval(timer);
-  }, [id, running]);
-  useEffect(() => { let active = true; setBusy(true); api.get<typeof data>(`/api/v1/history/${id}`).then((result) => { if (active) setData(result); }).catch((err) => { if (active) { setError(err instanceof Error ? err.message : "Could not load job."); setHint(hintOf(err)); } }).finally(() => { if (active) setBusy(false); }); return () => { active = false; }; }, [id]);
-  const remove = async () => { if (!window.confirm("Delete this job and its stored artifacts?")) return; try { await api.del(`/api/v1/history/${id}`); window.location.href = "/app/history"; } catch (err) { setError(err instanceof Error ? err.message : "Could not delete job."); setHint(hintOf(err)); } };
-  return <PageFrame title="Job details" context="Stored optimization record" eyebrow="History" description="Inspect the metadata and artifact availability recorded for this job." maxWidth="max-w-5xl" actions={<ButtonLink href="/app/history" variant="secondary" size="sm">Back to history</ButtonLink>}>
-    {error ? <ErrorState title="Job unavailable" message={error} hint={hint ?? "The record may have expired, been deleted, or belong to another session."} /> : busy ? <ProgressIndicator label="Loading job details…" /> : data ? <>
-      <Panel><PanelHeader title={data.job.label} description={`Created ${new Date(data.job.createdAt).toLocaleString()}`} actions={<StatusBadge tone={statusToneFor(data.job.status)}>{data.job.status}</StatusBadge>} />
-        <StatStrip items={[{ label: "Files", value: formatNumber(data.job.fileCount) }, { label: "Input", value: formatBytes(data.job.inputBytes) }, { label: "Output", value: formatBytes(data.job.outputBytes) }, { label: "Bytes saved", value: formatBytes(data.job.savedBytes) }]} />
-        {data.job.note ? <p className="mt-4 text-sm text-muted">{data.job.note}</p> : null}
-      </Panel>
-      <Panel><PanelHeader title="Processed items" description="Downloads are available while their artifacts remain in storage." />
-        <TableShell><thead><tr><Th>File</Th><Th>Status</Th><Th>Format</Th><Th numeric>Before</Th><Th numeric>After</Th><Th numeric>Saved</Th><Th>Output</Th></tr></thead><tbody>{data.items.map((item) => <tr key={item.id}><Td>{item.filename}</Td><Td><StatusBadge tone={statusToneFor(item.status)}>{item.status}</StatusBadge></Td><Td>{item.outputFormat ?? "—"}</Td><Td numeric>{formatBytes(item.inputBytes)}</Td><Td numeric>{formatBytes(item.outputBytes)}</Td><Td numeric>{formatBytes(item.savedBytes)}</Td><Td>{item.hasArtifact ? <a className="text-xs font-medium text-accent hover:underline" href={`/api/v1/artifacts/${item.id}?download=1`}>Download</a> : <span className="text-xs text-muted">Unavailable</span>}</Td></tr>)}</tbody></TableShell>
-      </Panel>
-      <div className="flex flex-wrap gap-2"><Button variant="danger" onClick={remove}>Delete job</Button><ButtonLink href="/app/images" variant="primary">Optimize another image</ButtonLink></div>
-    </> : null}
-  </PageFrame>;
+    </WorkspaceShell>
+  );
 }
 
 export function NotFoundPage() {
-  return <div className="grid min-h-screen place-items-center bg-canvas px-4"><Panel className="w-full max-w-lg text-center"><p className="font-mono text-xs uppercase tracking-[0.16em] text-muted">404 · Not found</p><h1 className="mt-3 text-2xl font-semibold text-ink">This page is not here.</h1><p className="mt-2 text-sm text-muted">The page may have moved or the link may be incorrect.</p><ButtonLink className="mt-5" href="/app" variant="primary">Return to workspace</ButtonLink></Panel></div>;
+  // Without this the tab would keep the title of the page the visitor came from.
+  useEffect(() => {
+    document.title = "Page not found · Unikit Studio";
+  }, []);
+
+  return (
+    <main id="main" className="grid min-h-screen place-items-center bg-canvas px-4">
+      <Panel className="w-full max-w-lg text-center">
+        <p className="font-mono text-xs tracking-[0.16em] text-muted uppercase">404 · Not found</p>
+        <h1 className="mt-3 text-2xl font-semibold text-ink">This page does not exist</h1>
+        <p className="mt-2 text-sm leading-relaxed text-muted">The address may be mistyped, or the page may have been part of an earlier version.</p>
+        <div className="mt-5 flex flex-wrap justify-center gap-2">
+          <ButtonLink href="/app" variant="primary">Open the workspace</ButtonLink>
+          <ButtonLink href="/" variant="secondary">Home</ButtonLink>
+        </div>
+      </Panel>
+    </main>
+  );
+}
+
+/** Pages of earlier versions that kept records on a server. They explain what changed instead of failing. */
+export function RetiredPage({ title }: { title: string }) {
+  return (
+    <PageFrame title={title} context="No longer part of the app" eyebrow="Removed" description="This page listed records that an earlier version kept on a server." maxWidth="max-w-3xl">
+      <Panel>
+        <h2 className="text-sm font-semibold text-ink">Nothing is stored any more</h2>
+        <p className="mt-2 text-sm leading-relaxed text-muted">
+          The tools now run in your browser and keep no record of your files, so there is no history and no stored result to show. Results are available
+          on the tool's page until you leave it.
+        </p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <ButtonLink href="/app/images" variant="primary">Optimize images</ButtonLink>
+          <ButtonLink href="/app" variant="secondary">Overview</ButtonLink>
+        </div>
+      </Panel>
+    </PageFrame>
+  );
 }

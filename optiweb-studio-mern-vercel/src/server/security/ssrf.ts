@@ -6,60 +6,60 @@
  * addresses are rejected. This is a security boundary, not a convenience filter.
  */
 import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
 import { badRequest } from "../http/errors.js";
 
 const BLOCKED_HOSTS = new Set(["localhost", "localhost.localdomain", "metadata.google.internal"]);
 
-function ipv4ToInt(ip: string): number {
-  return ip.split(".").reduce((acc, octet) => (acc << 8) + Number(octet), 0) >>> 0;
+/**
+ * Every address range that is not the public internet. `BlockList` compares
+ * addresses as numbers, so no way of writing an address gets past it, and it
+ * checks an IPv4 address wrapped in IPv6 (`::ffff:127.0.0.1`, `::ffff:7f00:1`)
+ * against the IPv4 ranges.
+ */
+const NOT_PUBLIC = new BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8], // "this network"
+  ["10.0.0.0", 8], // private
+  ["100.64.0.0", 10], // carrier-grade NAT
+  ["127.0.0.0", 8], // loopback
+  ["169.254.0.0", 16], // link-local, cloud metadata services
+  ["172.16.0.0", 12], // private
+  ["192.0.0.0", 24], // protocol assignments
+  ["192.0.2.0", 24], // documentation
+  ["192.168.0.0", 16], // private
+  ["198.18.0.0", 15], // benchmarking
+  ["198.51.100.0", 24], // documentation
+  ["203.0.113.0", 24], // documentation
+  ["224.0.0.0", 3], // multicast, reserved, broadcast
+] as const) {
+  NOT_PUBLIC.addSubnet(network, prefix, "ipv4");
+}
+for (const [network, prefix] of [
+  ["::", 128], // unspecified
+  ["::1", 128], // loopback
+  ["64:ff9b::", 96], // NAT64: an IPv4 address in disguise
+  ["2001:db8::", 32], // documentation
+  ["2002::", 16], // 6to4: an IPv4 address in disguise
+  ["fc00::", 7], // unique local
+  ["fe80::", 10], // link-local
+  ["fec0::", 10], // site-local (deprecated)
+  ["ff00::", 8], // multicast
+] as const) {
+  NOT_PUBLIC.addSubnet(network, prefix, "ipv6");
 }
 
-function isPrivateIPv4(ip: string): boolean {
-  const n = ipv4ToInt(ip);
-  const ranges: Array<[number, number]> = [
-    [ipv4ToInt("0.0.0.0"), ipv4ToInt("0.255.255.255")],
-    [ipv4ToInt("10.0.0.0"), ipv4ToInt("10.255.255.255")],
-    [ipv4ToInt("100.64.0.0"), ipv4ToInt("100.127.255.255")],
-    [ipv4ToInt("127.0.0.0"), ipv4ToInt("127.255.255.255")],
-    [ipv4ToInt("169.254.0.0"), ipv4ToInt("169.254.255.255")],
-    [ipv4ToInt("172.16.0.0"), ipv4ToInt("172.31.255.255")],
-    [ipv4ToInt("192.0.0.0"), ipv4ToInt("192.0.0.255")],
-    [ipv4ToInt("192.0.2.0"), ipv4ToInt("192.0.2.255")],
-    [ipv4ToInt("192.168.0.0"), ipv4ToInt("192.168.255.255")],
-    [ipv4ToInt("198.18.0.0"), ipv4ToInt("198.19.255.255")],
-    [ipv4ToInt("198.51.100.0"), ipv4ToInt("198.51.100.255")],
-    [ipv4ToInt("203.0.113.0"), ipv4ToInt("203.0.113.255")],
-    [ipv4ToInt("224.0.0.0"), ipv4ToInt("255.255.255.255")],
-  ];
-  return ranges.some(([from, to]) => n >= from && n <= to);
-}
-
-function isPrivateIPv6(ip: string): boolean {
-  const lower = ip.toLowerCase();
-  if (lower === "::1" || lower === "::") return true;
-  if (lower.startsWith("fc") || lower.startsWith("fd") || lower.startsWith("fe80") || lower.startsWith("ff")) return true;
-  // IPv6 documentation prefix; it must not be treated as a public target.
-  if (lower.startsWith("2001:db8:")) return true;
-  if (lower.startsWith("::ffff:")) {
-    const mapped = lower.slice("::ffff:".length);
-    if (isIP(mapped) === 4) return isPrivateIPv4(mapped);
-  }
-  return false;
-}
-
+/** Throws unless `ip` is an address on the public internet. Anything that is not an IP address is refused. */
 export function assertPublicIp(ip: string): void {
   const version = isIP(ip);
-  if (version === 4 && isPrivateIPv4(ip)) {
-    throw badRequest("That address is not a public website.", "Private, loopback and link-local hosts cannot be audited.");
-  }
-  if (version === 6 && isPrivateIPv6(ip)) {
+  if (version === 0 || NOT_PUBLIC.check(ip, version === 4 ? "ipv4" : "ipv6")) {
     throw badRequest("That address is not a public website.", "Private, loopback and link-local hosts cannot be audited.");
   }
 }
 
 export async function assertPublicHostname(hostname: string): Promise<void> {
-  const host = hostname.replace(/\.$/, "").toLowerCase();
+  // A URL writes an IPv6 address in brackets: [::1].
+  const host = hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
   if (BLOCKED_HOSTS.has(host) || host.endsWith(".localhost") || host.endsWith(".internal")) {
     throw badRequest("That host cannot be audited.");
   }

@@ -19,7 +19,5 @@ function normalizeFunctionPath(request: IncomingMessage): void {
   }
 }
 
-export const handler = serverless(app, {
-  request: normalizeFunctionPath,
-  binary: ["application/octet-stream", "application/zip", "image/*", "font/*"],
-});
+// The API sends and receives JSON only, so no response type is treated as binary.
+export const handler = serverless(app, { request: normalizeFunctionPath });

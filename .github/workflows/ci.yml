@@ -1,26 +1,36 @@
 name: CI
 
-# Builds the app and runs every automated check, including the persistence and
-# API workflows against a real, throwaway MongoDB server. The database lives
-# only for the duration of the job, so destructive tests never touch Atlas or
-# production data.
+# Builds the app and runs every automated check. Nothing here needs a
+# database, a storage account or a secret: the app has none of them.
+#
+# The browser test drives the production build in Chrome's headless shell. It
+# is the check that a selected file never leaves the tab.
 #
 # Once the build succeeds, every test step runs even if an earlier one failed,
 # so a single run reports all failures.
 #
-# On `main`, a second job then checks the production site itself: that it
-# serves the build of this commit, that the API is deployed with it, and that an
-# image can be converted and downloaded.
+# A second job then checks the app where it is deployed: that the site serves
+# the build of this commit, with the API of this version beside it.
+#   - On `main` it checks production.
+#   - On any other branch it checks the deploy previews that the hosts built
+#     for the commit, so a pull request is checked on the hosts before it is
+#     merged.
+#   - Started by hand with an address, it checks that address.
 
 on:
   push:
   workflow_dispatch:
+    inputs:
+      url:
+        description: "Deployed site to check instead of production. Several addresses may be given, separated by spaces."
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event.inputs.url && 'site' || 'push' }}
   cancel-in-progress: true
 
 defaults:
@@ -29,25 +39,14 @@ defaults:
 
 jobs:
   verify:
-    name: Build, static checks and API tests
+    name: Build, static checks and tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    services:
-      mongodb:
-        image: mongo:7
-        ports:
-          - 27017:27017
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
+    timeout-minutes: 25
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: optiweb-studio-mern-vercel/.nvmrc
           cache: npm
@@ -66,74 +65,68 @@ jobs:
         id: build
         run: npm run build
 
-      - name: Static accessibility checks
+      - name: Core logic (image headers, checks before decoding, planner, CSS and asset analysis)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: npm run test:a11y
+        run: npm run test:unit
 
-      - name: Netlify function adapter checks (no database)
+      - name: Image pipeline steps and engine scheduling
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: npm run test:function
+        run: npm run test:pipeline
 
-      - name: Image outcome checks for the results panel (no database)
+      - name: Result model (sizes, savings, kept originals, totals)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run test:ui
 
-      - name: Image Optimizer screen in a DOM, from upload to download (no database)
+      - name: Image Optimizer screen in a DOM
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run test:dom
-
-      - name: Storage diagnostics for every failure category (no database)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: npm run test:storage
 
       - name: Website audit limits against a made-up site (no network)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run test:audit
 
-      # The direct-upload pipeline, through the HTTP API, on the local storage
-      # driver. First with an in-memory stand-in for the database, which checks
-      # the application logic; then against MongoDB, which checks the queries.
-      - name: Direct-upload pipeline (in-memory database stand-in)
+      - name: HTTP contract of the server (no uploads, no cookies, no storage)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: npm run test:pipeline
+        run: npm run test:api
 
-      - name: Direct-upload pipeline against an isolated MongoDB
+      - name: Security probe (source, dependencies, headers, build)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:security
+
+      - name: Netlify function adapter
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:function
+
+      - name: Accessibility (structure of every page, colour contrast)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run test:a11y
+
+      # The browser test asserts what the browser sends. The Google Chrome on the
+      # runner also calls Google's services on its own account, and gains new ones
+      # with its updates. Chrome's headless shell is the same engine, published by
+      # the Chrome team for testing, without the browser around it: it sends
+      # nothing of its own, so the assertion needs no exceptions.
+      - name: Install the test browser (Chrome's headless shell)
+        id: browser
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          path="$(npx --no-install @puppeteer/browsers install chrome-headless-shell@stable --path "$RUNNER_TEMP/browsers" --format '{{path}}' | tail -n 1)"
+          test -x "$path"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Real browser (files never leave the tab; real outputs, sizes and limits)
+        if: ${{ !cancelled() && steps.browser.outcome == 'success' }}
+        env:
+          CHROME_PATH: ${{ steps.browser.outputs.path }}
+        run: npm run test:browser
+
+      # The check that the deployed-site job runs, here against the server
+      # started the way a Node host starts it.
+      - name: Smoke test against the started server
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
-          MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_pipeline_${{ github.run_id }}_${{ github.run_attempt }}
-          NODE_ENV: test
-        run: npm run test:pipeline
-
-      # The Image Optimizer screen in direct-upload mode, in a DOM, against the
-      # same API: choose files, upload, follow the job, download.
-      - name: Direct-upload screen in a DOM (in-memory database stand-in)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: npm run test:dom:direct
-
-      - name: Direct-upload screen in a DOM against an isolated MongoDB
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        env:
-          MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_screen_${{ github.run_id }}_${{ github.run_attempt }}
-          NODE_ENV: test
-        run: npm run test:dom:direct
-
-      - name: Persistence, rollback and credential checks against an isolated MongoDB
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        env:
-          MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_storage_${{ github.run_id }}_${{ github.run_attempt }}
-          NODE_ENV: test
-        run: npm run test:storage:mongo
-
-      - name: API and persistence workflow against an isolated MongoDB
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        env:
-          MONGODB_URI: mongodb://127.0.0.1:27017/optiweb_ci_${{ github.run_id }}_${{ github.run_attempt }}
-          NODE_ENV: test
+          NODE_ENV: production
           PORT: "5000"
-          # The server runs with object storage on local disk, so that direct
-          # uploads and background jobs are in effect, as they are with Vercel Blob.
-          OW_STORAGE_DRIVER: local
-          OW_LOCAL_STORAGE_DIR: ${{ runner.temp }}/optiweb-objects
         run: |
           npm start > server.log 2>&1 &
           SERVER_PID=$!
@@ -143,58 +136,36 @@ jobs:
             sleep 1
           done
           set +e
-          node scripts/api-selftest.mjs http://127.0.0.1:5000
-          STATUS=$?
-          # The check that the production job runs, here against a server with a
-          # database and object storage: a standard upload is stored and
-          # downloaded by its URL, and a background job runs end to end.
           node scripts/deployed-smoke.mjs http://127.0.0.1:5000 --expect-build
           SMOKE=$?
           set -e
           echo "----- server log -----"
           cat server.log
-          if [ "$STATUS" -ne 0 ] || [ "$SMOKE" -ne 0 ]; then exit 1; fi
+          exit "$SMOKE"
 
-  # Processing time and memory at the configured limits, on this runner. Takes
-  # several minutes, so it runs only when asked for: start the workflow by
-  # hand, or put [bench] in a commit message.
-  capacity:
-    name: Capacity benchmark
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[bench]') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: optiweb-studio-mern-vercel/.nvmrc
-          cache: npm
-          cache-dependency-path: optiweb-studio-mern-vercel/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run the benchmark
-        run: npm run bench:capacity
-
-  production:
-    name: Production serves this build and converts an image
-    # Production is deployed from `main` by the hosting provider, in parallel
-    # with this workflow. Run the workflow by hand on `main` to check the site
-    # again at any time.
-    if: ${{ github.ref == 'refs/heads/main' }}
+  deployed:
+    name: Deployed site serves this build
+    # The hosting providers deploy in parallel with this workflow, so this job
+    # waits for them. Run the workflow by hand on `main` to check production
+    # again at any time, or with an address to check another site against the
+    # build of the chosen branch.
     needs: verify
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      # To read which deploy previews the hosts reported on the commit.
+      statuses: read
     env:
-      # Set the repository variable PRODUCTION_URL to check another address.
-      PRODUCTION_URL: ${{ vars.PRODUCTION_URL || 'https://optiweb-studio-mern-vercel.vercel.app' }}
+      # The addresses to check: the one given by hand, else production on
+      # `main` (set the repository variable PRODUCTION_URL to change it). Empty
+      # on any other branch, where the deploy previews of the commit are used.
+      CHECK_URLS: ${{ github.event.inputs.url || (github.ref == 'refs/heads/main' && (vars.PRODUCTION_URL || 'https://optiweb-studio-mern-vercel.vercel.app')) || '' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: optiweb-studio-mern-vercel/.nvmrc
           cache: npm
@@ -206,8 +177,27 @@ jobs:
       - name: Build, to know which app script this commit produces
         run: npm run build
 
-      # Waits up to ten minutes for the deployment of this commit. Uploads one
-      # small generated image; when the database is ready it is stored under a
-      # throwaway session and expires like any other result.
-      - name: Check the production site
-        run: node scripts/deployed-smoke.mjs "$PRODUCTION_URL" --expect-build --wait 600
+      # Waits up to ten minutes for the deployment of this commit. Sends one
+      # small generated image to confirm that uploads are refused, and asks
+      # the site to audit its own home page. Changes nothing on the site.
+      #
+      # `--audit` adds an observation that cannot fail the step: the site
+      # audits this repository's page on GitHub, whose files are on other
+      # hosts, and the step's notices say how many of them it could read.
+      #
+      # A preview that failed to build fails this step. A preview behind a
+      # sign-in is reported and left out. A commit without previews passes
+      # with a notice that no deployed copy of it was checked.
+      - name: Check the deployed site
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -f
+          STATUS=0
+          if [ -z "$CHECK_URLS" ]; then
+            CHECK_URLS="$(node scripts/deploy-previews.mjs "$GITHUB_REPOSITORY" "$GITHUB_SHA" --wait 600)" || STATUS=1
+          fi
+          for url in $CHECK_URLS; do
+            node scripts/deployed-smoke.mjs "$url" --expect-build --wait 600 --audit "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" || STATUS=1
+          done
+          exit "$STATUS"

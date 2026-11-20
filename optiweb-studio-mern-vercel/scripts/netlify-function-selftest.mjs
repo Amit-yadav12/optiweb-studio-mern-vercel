@@ -1,145 +1,128 @@
 #!/usr/bin/env node
 /**
- * Exercises the real Netlify serverless-http function adapter without Netlify
- * credentials or an Atlas database. Never run persistence cases against a live
- * MONGODB_URI; use scripts/api-selftest.mjs with a dedicated test database.
+ * Self-test of the Netlify function, through its real adapter. Needs no
+ * Netlify account and no network.
+ *
+ *   npm run test:function
+ *
+ * On Netlify the API is one function. A request reaches it as an event object,
+ * with a body that may be base64 encoded, and the answer goes back as an
+ * object. This test builds such events and calls the function's handler, so
+ * it covers what the HTTP tests cannot: that paths, JSON bodies, headers and
+ * refusals survive the adapter.
+ *
+ * It does not cover Netlify's own routing (the redirect of /api/* to the
+ * function) or its bundler. `npm run smoke -- <site>` checks a deployed site.
  */
-import assert from "node:assert/strict";
-import sharp from "sharp";
+import { createChecker, fixture, UUID } from "./lib/selftest-kit.mjs";
 
-if (process.env.MONGODB_URI || process.env.MONGO_URL) {
-  throw new Error("Refusing to run the no-database function smoke test with a MongoDB URI configured.");
-}
+const { check, section, report, crashed } = createChecker("netlify-function-selftest");
+process.on("uncaughtException", (error) => { crashed(error); process.exit(1); });
+process.on("unhandledRejection", (error) => { crashed(error); process.exit(1); });
+
 process.env.NETLIFY = "true";
+delete process.env.PAGESPEED_API_KEY;
 const { handler } = await import("../netlify/functions/api.ts");
+const { SECURITY_HEADERS } = await import("../src/server/config/securityHeaders.ts");
 
-const context = { functionName: "api", awsRequestId: "function-smoke-test" };
-function makeEvent({ method = "GET", path, headers = {}, body = "", isBase64Encoded = false }) {
-  return {
-    httpMethod: method,
-    path,
-    headers: { host: "localhost", "x-forwarded-proto": "http", ...headers },
-    multiValueHeaders: {},
-    queryStringParameters: null,
-    multiValueQueryStringParameters: null,
-    body,
-    isBase64Encoded,
-    requestContext: { identity: { sourceIp: "127.0.0.1" }, requestId: "netlify-function-smoke" },
-  };
+const context = { functionName: "api" };
+let clients = 0;
+/** One invocation, shaped as Netlify shapes it. Each call site may name a client, so the audit's rate limit does not carry over. */
+async function invoke({ method = "GET", path, headers = {}, body = "", isBase64Encoded = false, client = "203.0.113.200" }) {
+  const response = await handler(
+    {
+      httpMethod: method,
+      path,
+      headers: { host: "example.netlify.app", "x-forwarded-proto": "https", "x-forwarded-for": client, ...headers },
+      multiValueHeaders: {},
+      queryStringParameters: null,
+      multiValueQueryStringParameters: null,
+      body,
+      isBase64Encoded,
+      requestContext: { identity: { sourceIp: client } },
+    },
+    context,
+  );
+  const type = String(response.headers?.["content-type"] ?? "");
+  let json = null;
+  if (type.includes("json")) {
+    try {
+      json = JSON.parse(response.isBase64Encoded ? Buffer.from(response.body, "base64").toString("utf8") : response.body);
+    } catch {
+      json = null;
+    }
+  }
+  return { ...response, type, json, cookies: response.headers?.["set-cookie"] ?? response.multiValueHeaders?.["set-cookie"] ?? null };
 }
-async function invoke(event) {
-  return handler(event, context);
+const nextClient = () => `203.0.113.${(clients += 1)}`;
+const jsonBody = (value) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
+
+section("the function answers as the API");
+{
+  const health = await invoke({ path: "/api/v1/health" });
+  check("a request rewritten from /api/v1/health reaches the app", health.statusCode === 200 && health.json?.ok === true && health.json.data.service === "Unikit Studio");
+  check("the answer states that nothing is uploaded or stored", health.json.data.acceptsFileUploads === false && health.json.data.storesFiles === false && health.json.data.usesCookies === false && health.json.data.processing.images === "browser");
+  check("it carries a request ID in the header and in the body", UUID.test(String(health.headers["x-request-id"])) && health.json.meta.requestId === health.headers["x-request-id"]);
+  check("it sets no cookie", health.cookies === null);
+  const missing = Object.entries(SECURITY_HEADERS).filter(([name, value]) => health.headers[name.toLowerCase()] !== value).map(([name]) => name);
+  check("the security headers survive the adapter", missing.length === 0, missing.join(", "));
+  check("a JSON answer is sent as text, not as base64", health.isBase64Encoded !== true && typeof health.body === "string" && health.body.startsWith("{"));
+  const direct = await invoke({ path: "/.netlify/functions/api/api/v1/health" });
+  check("the function's own address works too, without doubling the path", direct.statusCode === 200 && direct.json?.data?.service === "Unikit Studio");
+  const traced = await invoke({ path: "/api/v1/health", headers: { "x-request-id": "trace-abc-123" } });
+  check("a plain request ID supplied by the caller is kept, so one ID follows a request through the logs", traced.headers["x-request-id"] === "trace-abc-123" && traced.json.meta.requestId === "trace-abc-123");
+  const plain = await invoke({ path: "/api/health" });
+  check("the plain health check for monitors answers", plain.statusCode === 200 && plain.json?.ok === true && plain.json.acceptsFileUploads === false);
+  const unknown = await invoke({ path: "/api/v1/nothing-here" });
+  check("an unknown API path is a JSON 404 from the app, not an error of the adapter", unknown.statusCode === 404 && unknown.json?.error?.code === "not_found");
 }
-function json(response) {
-  assert.match(response.headers?.["content-type"] ?? "", /application\/json/i);
-  return JSON.parse(response.body);
+
+section("the audit endpoint through the adapter");
+{
+  const client = nextClient();
+  const empty = await invoke({ path: "/api/v1/audits", client, ...jsonBody({}) });
+  check("a JSON body arrives and is validated: an empty object is a 422 that names the url field", empty.statusCode === 422 && empty.json?.error?.code === "validation_error" && empty.json.error.details.some((detail) => detail.path === "url"), JSON.stringify(empty.json));
+  const encoded = await invoke({ path: "/api/v1/audits", client, method: "POST", headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ url: "http://127.0.0.1:9/" })).toString("base64"), isBase64Encoded: true });
+  check("a JSON body that Netlify delivers base64 encoded is decoded, and a loopback address in it is refused", encoded.statusCode === 400 && encoded.json?.error?.code === "bad_request" && /not a public website/.test(encoded.json.error.message), JSON.stringify(encoded.json));
+  const metadata = await invoke({ path: "/api/v1/audits", client, ...jsonBody({ url: "http://169.254.169.254/latest/meta-data/" }) });
+  check("the cloud metadata address is refused", metadata.statusCode === 400 && metadata.json?.error?.code === "bad_request");
+  const broken = await invoke({ path: "/api/v1/audits", client, method: "POST", headers: { "content-type": "application/json" }, body: '{"url": ' });
+  check("malformed JSON is a JSON 400", broken.statusCode === 400 && broken.json?.error?.code === "bad_request");
+  const wrongMethod = await invoke({ path: "/api/v1/audits", client });
+  check("GET is refused with 405 and the allowed method", wrongMethod.statusCode === 405 && wrongMethod.headers.allow === "POST");
+  const limited = nextClient();
+  const statuses = [];
+  for (let attempt = 0; attempt < 11; attempt += 1) statuses.push((await invoke({ path: "/api/v1/audits", client: limited, ...jsonBody({}) })).statusCode);
+  check("the rate limit sees the visitor's address, not the proxy's: the eleventh request of one visitor is a 429", statuses.slice(0, 10).every((status) => status === 422) && statuses[10] === 429, statuses.join(" "));
+  const other = await invoke({ path: "/api/v1/audits", client: nextClient(), ...jsonBody({}) });
+  check("and another visitor is not affected", other.statusCode === 422);
 }
 
-let passed = 0;
-function check(name, condition) {
-  assert.ok(condition, name);
-  passed += 1;
-  console.log(`✓ ${name}`);
+section("uploads through the adapter: refused, whatever the encoding");
+{
+  const canary = `CANARY-${Date.now().toString(36)}`;
+  const form = new FormData();
+  form.append("files", new Blob([fixture("photo-800x600.jpg")], { type: "image/jpeg" }), `${canary}.jpg`);
+  form.append("format", "webp");
+  const request = new Request("https://example.netlify.app/api/v1/images/optimize", { method: "POST", body: form });
+  const multipart = Buffer.from(await request.arrayBuffer());
+  const upload = (path) => invoke({ path, method: "POST", headers: { "content-type": request.headers.get("content-type"), "content-length": String(multipart.length) }, body: multipart.toString("base64"), isBase64Encoded: true, client: nextClient() });
+  const old = await upload("/api/v1/images/optimize");
+  check(`a ${Math.round(multipart.length / 1024)} KB multipart upload to the old image endpoint is answered 410 Gone`, old.statusCode === 410 && old.json?.error?.code === "gone" && /in the browser/.test(old.json.error.hint ?? ""), `${old.statusCode} ${old.json?.error?.code}`);
+  const audits = await upload("/api/v1/audits");
+  check("the same upload to the audit endpoint is answered 415: it takes JSON only", audits.statusCode === 415 && audits.json?.error?.code === "unsupported_media_type");
+  const elsewhere = await upload("/api/v1/upload");
+  check("and to any other API path, 404", elsewhere.statusCode === 404 && elsewhere.json?.error?.code === "not_found");
+  check("no answer repeats the file's name or contents", [old, audits, elsewhere].every((response) => !String(response.body).includes(canary) && String(response.body).length < 2_000));
+  check("no answer sets a cookie", [old, audits, elsewhere].every((response) => response.cookies === null));
+  const removed = [];
+  for (const path of ["/api/v1/history", "/api/v1/usage", "/api/v1/limits", "/api/v1/session", "/api/v1/preferences", "/api/v1/artifacts/abc", "/api/v1/jobs/abc", "/api/v1/internal/cleanup"]) {
+    const response = await invoke({ path, client: nextClient() });
+    if (response.statusCode !== 410) removed.push(`${path} → ${response.statusCode}`);
+  }
+  check("the storage, history and job endpoints of earlier versions answer 410", removed.length === 0, removed.join("; "));
 }
 
-const health = await invoke(makeEvent({ path: "/api/v1/health" }));
-const healthBody = json(health);
-check("rewritten /api/v1/health reaches the mounted Express API", health.statusCode === 200 && healthBody.ok === true);
-check("Express response includes a request correlation id", Boolean(health.headers["x-request-id"]));
-const setCookie = health.headers?.["set-cookie"] ?? health.multiValueHeaders?.["set-cookie"]?.join("; ") ?? "";
-check("HTTP-only guest session cookie survives the function adapter", /ow_sid=.*HttpOnly.*SameSite=Lax/i.test(setCookie));
-check("Sharp native runtime is available", healthBody.data.sharp.available === true);
-check("unconfigured MongoDB is reported honestly", healthBody.data.database.connected === false);
-const directFunctionHealth = await invoke(makeEvent({ path: "/.netlify/functions/api/api/v1/health" }));
-check("direct Netlify Function mount is normalized without duplicating /api", directFunctionHealth.statusCode === 200 && json(directFunctionHealth).data.service === "OptiWeb Studio");
-
-const limits = json(await invoke(makeEvent({ path: "/api/v1/limits" })));
-check("runtime AVIF encoder probe is reflected in API limits", limits.data.avifSupported === true && limits.data.imageFormats.includes("avif"));
-
-const css = "@font-face { font-family: Demo; src: url(demo.woff2); }\nbody { color: #17212b; }";
-const cssAnalyze = await invoke(makeEvent({
-  method: "POST",
-  path: "/api/v1/css/analyze",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({ css }),
-}));
-const cssAnalysisBody = json(cssAnalyze);
-check("JSON API body reaches PostCSS analysis with the expected path", cssAnalyze.statusCode === 200 && cssAnalysisBody.data.fontFaceCount === 1);
-
-const cssPatch = await invoke(makeEvent({
-  method: "POST",
-  path: "/api/v1/css/patch-font-display",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({ css, policy: "swap" }),
-}));
-const patchBody = json(cssPatch);
-check("CSS patch transforms the actual stylesheet and discloses non-persistence", cssPatch.statusCode === 200 && /font-display:\s*swap/.test(patchBody.data.output) && patchBody.data.persisted === false);
-
-const first = await sharp({ create: { width: 96, height: 64, channels: 3, background: { r: 36, g: 92, b: 230 } } }).jpeg({ quality: 92 }).toBuffer();
-const second = await sharp({ create: { width: 80, height: 50, channels: 4, background: { r: 255, g: 0, b: 120, alpha: 0.5 } } }).png().toBuffer();
-const assetPng = await sharp({ create: { width: 24, height: 18, channels: 4, background: { r: 20, g: 160, b: 90, alpha: 0.7 } } }).png().toBuffer();
-const assetForm = new FormData();
-assetForm.append("files", new Blob([assetPng], { type: "image/png" }), "asset.png");
-assetForm.append("files", new Blob([css], { type: "text/css" }), "site.css");
-const assetRequest = new Request("https://localhost/api/v1/assets/analyze", { method: "POST", body: assetForm });
-const assetBytes = Buffer.from(await assetRequest.arrayBuffer());
-const assetResponse = await invoke(makeEvent({
-  method: "POST",
-  path: "/api/v1/assets/analyze",
-  headers: { "content-type": assetRequest.headers.get("content-type") },
-  body: assetBytes.toString("base64"),
-  isBase64Encoded: true,
-}));
-const assetBody = json(assetResponse);
-check("Asset Analyzer returns real dimensions for images and routes CSS findings", assetResponse.statusCode === 200 && assetBody.data.files.length === 2 && assetBody.data.files.some((file) => file.width === 24 && file.height === 18) && assetBody.data.files.some((file) => file.kind === "css"));
-
-const auditResponse = await invoke(makeEvent({ method: "POST", path: "/api/v1/audits", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: "http://127.0.0.1:9999" }) }));
-const auditBody = json(auditResponse);
-check("Website Audit blocks a loopback SSRF target with a safe JSON error", auditResponse.statusCode === 400 && auditBody.error.code === "bad_request");
-
-const historyResponse = await invoke(makeEvent({ path: "/api/v1/history" }));
-const historyBody = json(historyResponse);
-check("history returns an actionable 503 when MongoDB is not configured", historyResponse.statusCode === 503 && historyBody.error.code === "storage_unavailable");
-
-const form = new FormData();
-form.append("files", new Blob([first], { type: "image/jpeg" }), "blue.jpg");
-form.append("files", new Blob([second], { type: "image/png" }), "alpha.png");
-form.append("format", "webp");
-form.append("quality", "78");
-const request = new Request("https://localhost/api/v1/images/optimize", { method: "POST", body: form });
-const multipartBody = Buffer.from(await request.arrayBuffer());
-const optimize = await invoke(makeEvent({
-  method: "POST",
-  path: "/api/v1/images/optimize",
-  headers: { "content-type": request.headers.get("content-type"), "content-length": String(multipartBody.byteLength) },
-  body: multipartBody.toString("base64"),
-  isBase64Encoded: true,
-}));
-const optimizeBody = json(optimize);
-check("Base64 multipart upload preserves its boundary through Netlify and Express", optimize.statusCode === 200 && optimizeBody.data.results.length === 2);
-check("two real images are converted by Sharp to WebP", optimizeBody.data.results.every((result) => result.status === "completed" && result.outputFormat === "webp" && result.outputBytes > 0));
-check("image workflow discloses that stored downloads require MongoDB persistence", optimizeBody.data.persisted === false && optimizeBody.data.results.every((result) => result.status === "completed" && result.artifactId === null));
-const sentFiles = optimizeBody.data.results.map((result) => (result.inlineOutput?.encoding === "base64" ? Buffer.from(result.inlineOutput.data, "base64") : null));
-const sentFormats = await Promise.all(sentFiles.map((file) => (file ? sharp(file).metadata().then((meta) => meta.format, () => null) : null)));
-check("without storage, the converted files come back in the function's response, intact", sentFiles.every((file, index) => file !== null && file.length === optimizeBody.data.results[index].outputBytes) && sentFormats.every((format) => format === "webp"), sentFormats.join(", "));
-check("the function response with the files stays below Netlify's 6 MB response limit", Buffer.byteLength(optimize.body ?? "", optimize.isBase64Encoded ? "base64" : "utf8") < 6_000_000 && optimize.isBase64Encoded !== true);
-
-const avifForm = new FormData();
-avifForm.append("files", new Blob([first], { type: "image/jpeg" }), "avif-check.jpg");
-avifForm.append("format", "avif");
-const avifRequest = new Request("https://localhost/api/v1/images/optimize", { method: "POST", body: avifForm });
-const avifBytes = Buffer.from(await avifRequest.arrayBuffer());
-const avifResponse = await invoke(makeEvent({ method: "POST", path: "/api/v1/images/optimize", headers: { "content-type": avifRequest.headers.get("content-type") }, body: avifBytes.toString("base64"), isBase64Encoded: true }));
-const avifBody = json(avifResponse);
-check("Sharp actually encodes an AVIF output when the runtime probe is positive", avifResponse.statusCode === 200 && avifBody.data.results[0]?.outputFormat === "avif" && avifBody.data.results[0]?.outputBytes > 0);
-
-const invalid = await invoke(makeEvent({
-  method: "POST",
-  path: "/api/v1/images/optimize",
-  headers: { "content-type": "application/json" },
-  body: "{}",
-}));
-const invalidBody = json(invalid);
-check("invalid content type receives a consistent JSON 400 instead of an HTML 500", invalid.statusCode === 400 && invalidBody.ok === false);
-
-console.log(`\n${passed} Netlify function adapter checks passed (MongoDB persistence intentionally untested).`);
+const ok = report();
+if (ok) console.log("\nAll Netlify function checks passed.");
+process.exit(ok ? 0 : 1);

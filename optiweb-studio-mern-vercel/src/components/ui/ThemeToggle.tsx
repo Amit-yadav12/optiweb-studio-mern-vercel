@@ -1,6 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
-import { THEME_STORAGE_KEY } from "@/lib/theme-bootstrap";
+import { THEME_STORAGE_KEY } from "@/lib/storage-keys";
 
 export type ThemeChoice = "system" | "light" | "dark";
 
@@ -15,8 +15,8 @@ const LABEL: Record<ThemeChoice, string> = {
 /**
  * External store for the theme.
  *
- * The source of truth lives outside React: `data-theme` on <html> (set by the
- * bootstrap script before paint) and the localStorage override. Reading them
+ * The source of truth lives outside React: `data-theme` on <html> (set by
+ * `public/theme.js` before paint) and the localStorage override. Reading them
  * through `useSyncExternalStore` keeps the button truthful without setState-in-
  * effect, and a MutationObserver means any change (including from another tab)
  * re-renders the control.
@@ -31,8 +31,10 @@ function subscribe(onChange: () => void): () => void {
 
   const media = window.matchMedia("(prefers-color-scheme: dark)");
   const onMediaChange = () => {
-    // Only relevant while the user has not pinned an explicit theme.
-    if (!window.localStorage.getItem(THEME_STORAGE_KEY)) emit();
+    // Only relevant while the user has not pinned an explicit theme: the page then follows the system.
+    if (window.localStorage.getItem(THEME_STORAGE_KEY)) return;
+    document.documentElement.setAttribute("data-theme", media.matches ? "dark" : "light");
+    emit();
   };
   const observer = new MutationObserver(emit);
   const onStorage = (event: StorageEvent) => {

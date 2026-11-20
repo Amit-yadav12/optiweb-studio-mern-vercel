@@ -3,26 +3,42 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f7f8fa" />
-    <meta name="description" content="OptiWeb Studio — optimize images, inspect CSS font-loading rules, and measure real asset savings." />
-    <meta property="og:title" content="OptiWeb Studio — Make every byte count" />
-    <meta property="og:description" content="A focused developer workspace for image optimization and web font analysis." />
+    <title>Unikit Studio — Image and web-asset tools that run in your browser</title>
+    <meta name="description" content="Unikit Studio converts images to WebP, AVIF, JPEG and PNG, patches CSS font-display and inspects web assets. Everything runs in your browser: your files are not uploaded." />
+    <meta name="application-name" content="Unikit Studio" />
+    <meta name="apple-mobile-web-app-title" content="Unikit" />
+    <meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0f1720" media="(prefers-color-scheme: dark)" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Unikit Studio" />
+    <meta property="og:title" content="Unikit Studio — Image and web-asset tools that run in your browser" />
+    <meta property="og:description" content="Convert images, patch CSS font-display and inspect web assets. Your browser does the work, so your files stay on your device." />
+    <meta property="og:image" content="/og-image.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Unikit Studio. Lighter assets. Nothing uploaded." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Unikit Studio — Image and web-asset tools that run in your browser" />
+    <meta name="twitter:description" content="Convert images, patch CSS font-display and inspect web assets. Your browser does the work, so your files stay on your device." />
+    <meta name="twitter:image" content="/og-image.png" />
+    <meta name="twitter:image:alt" content="Unikit Studio. Lighter assets. Nothing uploaded." />
+
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <title>OptiWeb Studio — Make every byte count</title>
-    <script>
-      (() => {
-        try {
-          const saved = localStorage.getItem('ow-theme');
-          const resolved = saved === 'light' || saved === 'dark' ? saved : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-          document.documentElement.setAttribute('data-theme', resolved);
-        } catch (_) {
-          document.documentElement.setAttribute('data-theme', 'light');
-        }
-      })();
-    </script>
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <!-- Sets the theme before first paint. A separate file, so the Content-Security-Policy allows no inline script. -->
+    <script src="/theme.js"></script>
   </head>
   <body class="antialiased">
     <a href="#main" class="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-100 focus:rounded-md focus:border focus:border-accent focus:bg-surface focus:px-3 focus:py-2 focus:text-sm focus:text-ink">Skip to main content</a>
+    <noscript>
+      <p style="margin: 2rem; font-family: system-ui, sans-serif">Unikit Studio processes files in your browser, so it needs JavaScript. Enable JavaScript and reload the page.</p>
+    </noscript>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

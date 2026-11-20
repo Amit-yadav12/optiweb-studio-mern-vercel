@@ -1,191 +1,234 @@
-# Release status — high-capacity uploads
+# Release status: Unikit Studio 2.0
 
-Date: 2026-11-18. Branch: `arena/f22e6b19-optiweb-studio-mern-vercel`.
+Date: 2026-11-20. Branch: `arena/09d3efa7-optiweb-studio-mern-vercel`.
+Pull request: #6.
 
-## Verdict: NOT READY
+## Verdict
 
-The high-capacity mode is implemented and tested everywhere except where it finally has to work. Nothing in it has run on Vercel: not the Vercel Blob calls, not the worker inside a function, not a streamed download through a function. The release gate in the brief is a verified Vercel preview, and that gate is not met.
+**The code is ready to merge. Two deployed previews of it pass the smoke test.
+Production has not run it yet.**
 
-Three things stand in the way, and none of them is in the repository:
+Everything that can be checked from a build has been checked in real browsers,
+in the development sandbox and on GitHub. Two Netlify previews of the pull
+request pass the smoke test. What remains is outside the repository: the
+Vercel production address is still assigned to an old deployment and has to be
+promoted by hand (see "To do on the hosts").
 
-1. **The production address does not serve the current code.** `optiweb-studio-mern-vercel.vercel.app` still answers every `/api` path with Vercel's 404 page, as it has since 2026-11-10. A deployment of `main` has to be promoted in the Vercel dashboard.
-2. **No object storage is known to be connected.** Direct uploads need a private Vercel Blob store with a read-write token.
-3. **The database refuses the hosts.** The Netlify sites, which do run the current code, report `network_access_denied` from MongoDB Atlas. The same is likely on Vercel.
+## What this release is
 
-Preview deployments of this branch build successfully on Vercel, but they are behind Vercel's login, so they could not be exercised from outside. The Vercel connector has no access to the team's projects, so settings, environment variables and logs could not be read.
+Images, stylesheets and asset files are processed in the visitor's browser.
+The server keeps one job, the Website Audit, and has no endpoint that accepts a
+file. The database, object storage, sessions, cookies, quotas, background jobs
+and the scheduled cleanup are removed. The product is renamed from OptiWeb
+Studio to Unikit Studio. Details: [README.md](README.md).
 
-Merging this branch is safe in the meantime: without object storage the application behaves as before, with the same small limits, and says which mode is in effect.
+## Verified, and how
 
-## What to do, in order
-
-1. In Vercel, promote the newest deployment of `main` to production (or use "Undo Rollback").
-2. In Atlas, allow the hosts in Network Access. Rotate the database password that was pasted into the chat, and put the new connection string, with a database name, in `MONGODB_URI`.
-3. In Vercel: Storage → Create → Blob → **Private**, with "Add a read-write token env var to this connection" ticked.
-4. Add `CRON_SECRET` (at least 16 letters and digits). Redeploy.
-5. Open `/api/v1/limits`: `image.mode` must read `direct`.
-6. Run the workflow "CI" on `main`. Its job "Production serves this build and converts an image" then uploads a 6.6 MB file straight to the Blob store, follows the background job and downloads a 6.2 MB result. That run is the first real test of everything listed as unverified below.
-
-## 1. Limits before
-
-Files travelled inside the request to a function, which Vercel caps at 4.5 MB: 1 MB per file, 4 files and 3.8 MB per batch, 24 MP per image. Results were kept in MongoDB documents, 3.5 MB at most, and a ZIP was buffered, 3.5 MB at most. Conversion ran inside the request. The rate limit lived in the memory of one function instance. There was no storage quota. Settings and the landing page showed limits the server did not enforce (10 MB, 8 files, 400,000 characters).
-
-## 2. Architecture now
-
-```
-browser ── create job ────────────────▶ API ── job, files, quota ──▶ MongoDB
-browser ── ask for upload authorization ▶ API   (20 minutes, one path, one size, one type)
-browser ══ file ═════════════════════════════════════════════════▶ Vercel Blob (private)
-browser ── confirm ───────────────────▶ API ── looks the file up in storage; checks size and signature
-                                         API ── worker: read, convert, write result ──▶ Vercel Blob
-browser ── poll / download ───────────▶ API ── streams the result to the session that owns it
-```
-
-- MongoDB is the record of everything. The Blob store holds only bytes, and nothing in it is public.
-- A job is a record with a state and a lease. A worker claims it with one conditional write, processes one file at a time, and extends the lease while it works. If the function dies, the next run takes the job over.
-- The standard upload inside the request is unchanged and is used when object storage or the database is missing.
-
-## 3. Files changed
-
-64 files, about 8,000 lines added. New server code is in `src/server/storage/` (object storage interface, Vercel Blob driver, local driver) and `src/server/pipeline/` (jobs, worker, quotas, cleanup, streamed ZIP). New frontend code: `src/features/images/directJob.ts` and `directUpload.ts`, `src/features/usage/StorageUsage.tsx`, `src/lib/limits.ts`. Changed: the Image Optimizer, Asset Analyzer, Website Audit, Settings, landing page, History, the limits and artifact routes, `auditService.ts`, `imageService.ts`, `vercel.json`, CI, docs.
-
-## 4. New dependencies
-
-| Package | Why |
-| --- | --- |
-| `@vercel/blob` 2.9 | Object storage: client tokens, private reads, writes, deletes. Also loaded in the browser, on first use, for the upload itself (28 kB gzipped, in its own chunk). |
-| `@vercel/functions` 3.11 | `waitUntil`, so the worker can run after the response. |
-| `mingo` 7.2 (dev only) | Query engine of the in-memory database stand-in used by tests on machines without MongoDB. |
-
-No paid service was activated. Vercel Blob is billed by Vercel according to the plan; that cost starts when a store is created and used.
-
-## 5. MongoDB
-
-New collections, created on first use with their indexes:
-
-| Collection | Holds |
-| --- | --- |
-| `optiweb_uploads` | One record per source file of a background job: its upload, its processing state, its result. |
-| `optiweb_usage` | Byte counters per session and for the whole application. |
-| `optiweb_usage_days` | Application-wide counters per day (uploads, conversions, conversion time, downloads, failures, retries). Kept 90 days. |
-| `optiweb_rate_limits` | Rate-limit windows. Expire on their own. |
-| `optiweb_job_slots` | One document per job in progress; the unique `_id` is what limits jobs per session. |
-
-Changed, without a migration:
-
-- `optiweb_jobs`: background jobs carry `mode: "async"`, a state, a lease and `expireAt`. Records of the synchronous tools now get `expireAt` too (180 days). Records written before this release have no `expireAt` and are kept as before.
-- `optiweb_artifacts`: files of background jobs are records with `storage: "object"` and a storage path instead of the bytes. Existing records are untouched.
-
-## 6. Blob storage
-
-A **private** store, addressed through `BLOB_READ_WRITE_TOKEN`. Paths are generated by the server (`src/<owner>/<job>/<upload>/<name>`, `out/<owner>/<job>/<item>/<name>`), where `<owner>` is a one-way key derived from the session, never the session ID. Every object is written with a storage-side expiry as a backstop behind the cleanup routine. **Not connected or tested**: see the verdict.
-
-## 7. Background processing
-
-MongoDB job records with leases, driven by `waitUntil` after the confirming request, by status reads, and by a daily scheduled call (`vercel.json`).
-
-Vercel Workflows and Queues were evaluated and not used. Workflows documents Express support only through a Nitro build, which would replace this project's build and could not be verified. Queues is in beta. With the present design a job is never lost, but on the Hobby plan an interrupted job that nobody looks at resumes only with the daily schedule; on Pro the schedule can run every minute.
-
-## 8. Limits now
-
-| | Direct uploads | Inside a request (fallback) |
+| Suite | Checks | Result |
 | --- | --- | --- |
-| File | 25 MB | 1 MB |
-| Files per job | 10 | 4 |
-| Job in total | 150 MB | 3.8 MB |
-| Decoded pixels per image / per job | 40 MP / 160 MP | 24 MP / – |
-| Generated file | 50 MB | 3.5 MB |
-| ZIP download | 250 MB, streamed | 3.5 MB |
-| AVIF output | 16 MP | 24 MP |
-| CSS input | 1 MB | 1 MB |
-| Asset analysis | 10 files, 3.8 MB in total | same |
-| Website audit | 3 pages, 25 resources per page, 1 MB per document and resource, 24 MB and 45 s in total | same |
-| Storage per session | 500 MB | – |
-| Jobs in progress per session | 2 | – |
+| unit | 160 | pass |
+| pipeline | 83 | pass |
+| ui | 43 | pass |
+| dom | 75 | pass |
+| audit | 26 | pass |
+| api | 62 | pass |
+| security | 57 | pass |
+| function | 23 | pass |
+| a11y | 35 | pass |
+| browser | 181 | pass |
 
-Retention: sources 24 hours after the job, generated files 30 days, job records 180 days. Advanced capacity (50 MB, 20 files, 500 MB, 50 MP) is not available; the flag is read and reported, and raises nothing.
+All ten pass in the development sandbox (Node 22, 2 processor cores, 4 GB of
+memory) and in GitHub Actions. Typecheck and lint are clean.
 
-## 9–13. Tests
+### In browsers
 
-All of the following pass in CI on the last commit of this branch. "MongoDB" means a real `mongo:7` server in the CI job.
+The browser suite drives the production build, served by the real server. It
+passed in three browsers:
 
-| Suite | Checks | What it covers |
+| Browser | Where | Result |
 | --- | --- | --- |
-| `test:pipeline`, MongoDB | 161 | The pipeline through the HTTP API on the local storage driver: every limit at admission, upload authorization (one file, size, type, session, expiry, forged or altered signatures), confirmation (size mismatch, not an image, duplicate and simultaneous confirmations), formats, transparency, animation, pixel limits, partial failure, retries, storage failures, missing objects, concurrent workers, recovery after a crash, cancellation, quotas under simultaneous requests, idempotency, shared rate limit, ownership, retention, cleanup, History. |
-| `test:pipeline`, in-memory stand-in | 156 | The same without MongoDB; checks the logic, not the queries. |
-| `test:dom:direct`, both databases | 19 each | The Image Optimizer screen in jsdom: upload with progress, job, downloads, ZIP link, cancel, failed uploads, batch limits. |
-| Smoke test against a server process with MongoDB and object storage on disk | 17 | A 6.6 MB direct upload, a background job run by the server itself, a 6.2 MB streamed download. |
-| `test:audit` | 23 | Page and resource limits of the audit, against a made-up site. |
-| Earlier suites (API with MongoDB 107, persistence 54, storage diagnostics 226, results panel 102, optimizer screen 24, Netlify adapter 19, accessibility 13) | 545 | Unchanged behaviour of the request path. |
+| Chrome 158, headless shell (the browser CI uses) | GitHub Actions | 181 of 181 |
+| Google Chrome 157, the full browser | GitHub Actions | 181 of 181 |
+| Chromium 153, headless shell | sandbox | 181 of 181, as a 2-core and as a 4-core, 8 GB device |
 
-The MongoDB run earned its place: it found that three simultaneous jobs could all be admitted where two were allowed, which the stand-in had not shown. The admission was redesigned (slot documents, records before counters) and the stand-in now randomises the order of concurrent operations.
+What it established:
 
-Ten deliberate faults were introduced one at a time (for example: no session check on a job, no quota check, no lease check, no size check, a new artifact ID on every retry). The suite failed on each.
+- **Nothing is uploaded.** In the headless shell the whole browser made 48
+  requests. 47 were `GET`s for the app's own pages and code. One was the `POST`
+  of the Website Audit: 51 bytes of JSON, a URL and a page count. No request
+  carried image bytes, a file name, a multipart body or a result, and none
+  went to another host. In the full Chrome the app made 48 again, and the
+  browser added 21 `GET`s for the page's own icon and manifest, which a full
+  browser fetches by itself.
+- **The record would have shown it.** At the end of each run, a blank page in
+  the same browser context posts to another host. The record holds that
+  request, body included. The silence before it is not blindness.
+- **It works with the network cut.** Once the page and the encoder are loaded,
+  images are converted with every request failing.
+- **The outputs are real files.** Each is read back and identified from its
+  bytes: format, dimensions, no metadata. The sizes on screen are the sizes of
+  the files that are downloaded.
+- **A larger result is reported as larger**, and the original is offered.
+- **Rotation is applied and metadata is dropped.** A photo stored sideways with
+  a GPS position comes out upright, with no EXIF and no position.
+- **Limits hold.** A 69-byte PNG that declares 30,000 × 30,000 px is refused
+  from its header, before anything is decoded.
+- **Cancel works.** A batch of eight 12-megapixel AVIF encodes stops in well
+  under a second; finished files keep their results; the queue can run again.
+- **Concurrency is bounded.** Run as a 4-core, 8 GB device, never more than
+  three files were in work at once.
+- **Nothing is left behind.** Leaving the page releases every object URL and
+  terminates every worker. Cookies, IndexedDB and the Cache API stay empty.
+- **The security policy blocks other origins.** A `fetch` and an image request
+  to another origin, made from the page, are refused by the browser.
+- **The paths for other browsers work.** With workers or worker canvases taken
+  away, the page does the work itself. With a canvas that cannot write WebP,
+  as in Safari, the WebAssembly encoder writes it: a real 800 × 600 WebP of
+  87.7 KB from a 160.7 KB photo, with transparency kept where there is some.
 
-**Not tested:** anything against Vercel Blob itself; a real browser; a 10-file, 150 MB batch through a real network.
+Measured sizes at quality 78 (bytes), in the sandbox's Chromium 153:
 
-## 14–15. Performance
+| Source | WebP | AVIF | JPEG | PNG |
+| --- | --- | --- | --- | --- |
+| `photo-800x600.jpg`, 164,543 | 90,174 | 128,079 | 68,866 | 854,307 |
+| `flat-600x400.png`, 670 | 1,438 | 624 | 4,994 | n/a |
+| `alpha-320x200.png`, 65,965 | 5,512 | 2,536 | n/a | n/a |
 
-Measured on a development machine and on a GitHub Actions runner, not on Vercel. Full tables: `docs/capacity-benchmark.md`.
+A 12-megapixel photo (a 5.4 MB JPEG) took 2.2 s as WebP, 3.2 s as AVIF (4.1 s
+the first time, when the encoder is loaded) and 0.3 s as JPEG in the sandbox.
+The flat PNG shows why the app reports growth instead of hiding it: WebP and
+JPEG are larger than the 670-byte original.
 
-| | Development machine (Xeon 2.6 GHz) | GitHub runner (EPYC) | Peak memory |
-| --- | --- | --- | --- |
-| 1 MB, 2 MP | 0.4 s | 0.3 s | 0.2 GB |
-| 10 MB, 12 MP | 2.0 s | 1.4 s | 0.4 GB |
-| 25 MB, 39 MP | 6.8 s | 4.6 s | 0.75 GB |
-| 40 MP → WebP | 7.0 s | 4.9 s | 0.8 GB |
-| 16 MP → AVIF | 13.4 s | 8.1 s | 0.7 GB |
-| 10 files, 83 MB, one job | 15.6 s | 10.5 s | 0.6 GB |
-| Two jobs at once, 6 × 10 MB | 12.3 s | 8.4 s | 0.4 GB |
+### On the hosts
 
-- A 40 MP image stays under 1 GB because files are converted one at a time. A Hobby function has 2 GB.
-- AVIF at 40 MP took 63 s and 1.4 GB in an isolated measurement, so AVIF output is limited to 16 MP.
-- First and second run in a process took the same time. A function's cold start was not measured.
-- A 100-byte PNG whose header claims 900 MP is rejected in milliseconds, before any pixel is decoded.
+CI runs the smoke test against the deploy previews of every commit pushed to
+the pull request. For commit `5a3964d`, the last one before this page was
+written:
 
-## 16. Cost and quota safeguards
-
-Storage per session, jobs per session, an application-wide storage budget and a daily upload budget, all enforced with single conditional writes. A rate limit counted in the database. Storage-side expiry on every object. Daily counters of uploads, conversions, conversion time, downloads, failures and retries, with a warning flag at 80 % of a budget, at `GET /api/v1/internal/usage`. Limits are environment variables; the interface reads them from the server, so changing one needs a redeploy but no code change.
-
-Not built: a per-job cost figure in currency, and reading the storage provider's own usage numbers.
-
-## 17. Vercel build and deployment
-
-- Preview builds of this branch: **succeed** on both Vercel projects, with `maxDuration: 300` and the daily schedule in `vercel.json`.
-- Preview runtime: **not exercised** (behind Vercel's login).
-- Production: **serves an old deployment**; every `/api` path answers 404.
-- Netlify sites: run `main`; the API answers; MongoDB is refused (`network_access_denied`).
-
-## 18. Environment variables
-
-Needed for the high-capacity mode: `MONGODB_URI` (working), `BLOB_READ_WRITE_TOKEN`, `CRON_SECRET`. Everything else has a default; all variables the code reads are in `.env.example`.
-
-Note for existing deployments: `OW_MAX_FILE_MB`, `OW_MAX_FILES`, `OW_MAX_BATCH_MB`, `OW_MAX_ARTIFACT_MB` and `OW_MAX_ZIP_MB` now describe direct uploads. If a host still sets them to the old small values, remove them. The request path reads `OW_REQUEST_*`.
-
-## Feature classification
-
-| Feature | Status |
+| Preview | Result |
 | --- | --- |
-| Standard upload inside the request, with downloads when storage fails | VERIFIED WORKING (CI) |
-| Job admission, limits, quotas, idempotency, shared rate limit | VERIFIED WORKING (CI, MongoDB) |
-| Upload authorization bound to path, size, type, session and time | VERIFIED WORKING on the local driver; the Vercel Blob token is IMPLEMENTED BUT UNVERIFIED |
-| Upload confirmation: size, file signature, duplicates | VERIFIED WORKING (CI, MongoDB) |
-| Worker: claims, heartbeat, retries, recovery, cancellation, idempotent output | VERIFIED WORKING (CI, MongoDB) |
-| Worker started by `waitUntil` inside a Vercel function | IMPLEMENTED BUT UNVERIFIED |
-| Daily scheduled cleanup and recovery on Vercel | BLOCKED BY CONFIGURATION (`CRON_SECRET`; production must serve this code) |
-| Vercel Blob driver (private store) | BLOCKED BY CONFIGURATION (no store) and UNVERIFIED |
-| Streamed download and streamed ZIP | VERIFIED WORKING against a Node server; through a Vercel function IMPLEMENTED BUT UNVERIFIED |
-| Retention and cleanup, counters repair | VERIFIED WORKING (CI, MongoDB) |
-| History with background jobs, delete, clear | VERIFIED WORKING (CI, MongoDB) |
-| Storage usage page and panel | VERIFIED WORKING at API level; screen IMPLEMENTED BUT UNVERIFIED (typechecked, no screen test) |
-| Image Optimizer in direct mode | VERIFIED WORKING in jsdom; real browser and the Blob upload client UNVERIFIED |
-| CSS input up to 1 MB | IMPLEMENTED BUT UNVERIFIED beyond the existing CSS tests |
-| Asset Analyzer: 10 files, send all to the optimizer | PARTIALLY IMPLEMENTED: the files still travel inside the request, so 3.8 MB in total; no screen test |
-| Website audit: 3 pages, 25 resources, budgets | VERIFIED WORKING for the limits (made-up site) and for a real public page (CI); a real multi-page site was not audited |
-| Limits shown from the server everywhere | VERIFIED WORKING for the optimizer; Settings and landing page typechecked only |
-| Vercel Workflows, Vercel Queues | NOT IMPLEMENTED (reasons in section 7) |
-| Advanced capacity mode | NOT IMPLEMENTED (flag reported, raises nothing) |
-| ZIP exports stored for 24 hours | NOT IMPLEMENTED (ZIPs are streamed, not stored) |
-| Upload completion callback from Vercel Blob | NOT IMPLEMENTED (the browser confirms; the daily sweep accepts uploads that arrived unconfirmed) |
-| Limits adjustable without a redeploy | NOT IMPLEMENTED (environment variables) |
-| Malware scanning | NOT IMPLEMENTED (files are only ever decoded as images, never executed or served as anything else) |
-| Load test on the deployed runtime, 10 × 25 MB over a network | NOT DONE |
+| Netlify `rad-griffin-600eb2` | 31 of 31 |
+| Netlify `transcendent-biscuit-aa643c` | 31 of 31 |
+| Netlify `optiweb-studio-0` | built; not checked: its previews ask for a sign-in |
+| Vercel, both projects | built; not checked: their previews ask for a sign-in |
+
+Each of the two serves the app script of the commit and the API of this
+version, with the security policy in force. Each refused an upload at the old
+endpoint, at the audit endpoint and at a page address. Each audited its own
+home page: 8 resources, 347 KB, in under half a second.
+
+**An audit across hosts.** A site's own home page keeps its files on one host.
+Most pages do not, so that audit leaves a question open: can the deployed
+function read a page's resources on other hosts? The sandbox cannot answer it.
+Its network reaches `github.com` and a few package hosts only. The audit read
+`https://github.com/` there (537 KB) and requested 25 of the resources it
+names, on `github.githubassets.com` and `images.ctfassets.net`. Every
+connection to those two hosts was cut before a response, as it is for any host
+outside the sandbox's short list; `curl` fails the same way.
+
+So the smoke test gained an option, `--audit <page>`, and CI passes it the
+repository's page on GitHub. On both previews the function read that page and
+all 25 resources it requested, every one of them on another host
+(`github.githubassets.com` and `avatars.githubusercontent.com`): 1,881 KB in
+about 1.5 seconds. This is reported as a notice and cannot fail a run, because
+the page belongs to someone else. A run in which the page is not read proves
+nothing either way.
+
+## What the first run on GitHub uncovered
+
+The first CI run of the pull request failed 5 of 176 browser checks. The app
+was not at fault. The test was, in four ways, and each is fixed:
+
+1. **One record for two senders.** GitHub's runner has a full Google Chrome,
+   which calls Google's services by itself, whatever page is open. One proxy
+   for the whole browser counted those calls against the app. The app now runs
+   in a browser context with a proxy of its own, and the rest of the browser
+   uses a second one that refuses everything.
+2. **The sandbox browser ran with its security relaxed.** The packaged
+   Chromium suggests switches that turn off the same-origin policy and give
+   every page `SharedArrayBuffer`, and the launcher passed them on. They are
+   gone. Every result was measured again under normal switches. The sizes are
+   unchanged; the times above are the new ones.
+3. **A race in the keyboard test**, which those switches had hidden: the key
+   press could arrive before the request to report the file chooser.
+4. **Two checks that depended on timing or on the kind of browser.** One
+   looked for stopped workers after a fixed pause. One counted a full
+   browser's fetch of the page's icon as a request of the app.
+
+Three services of Chrome work inside every browsing context, so their calls
+reached the app's record: autofill lookups, a connection kept open to the
+search engine, and an "AI Mode" availability check. Each was identified from
+the log Chrome keeps of its own network activity and from Chromium's source,
+none is caused by a page, and each is switched off for the test. CI uses
+Chrome's headless shell, which has no services of its own, so a new service in
+a later Chrome cannot fail it.
+
+CI also gained a check: on a pull request branch it now runs the smoke test
+against the deploy previews of the commit. That is how the table above was
+made.
+
+## Faults found in the app, and fixed
+
+The new tests, and a look at every rendered page, found these:
+
+- **Order and load when a worker cannot start.** The page then does the work
+  itself. It started several files at once and finished them in reverse order.
+  It now takes one file at a time, in order.
+- **Text on the primary button in the dark theme** had a contrast of about
+  3:1. It is 6.25:1 now.
+- **Thirteen decorative icons** were exposed to assistive technology. They are
+  hidden from it now.
+- **The 404 page** had no `main` landmark, and it kept the title of the page
+  the visitor came from in the browser tab.
+- **The audit's confirmation** read "1 resources".
+
+## Not verified
+
+- **Production.** The Vercel production address still serves a deployment of
+  the first commit. See "To do on the hosts".
+- **The previews that ask for a sign-in**: Vercel's, and those of the Netlify
+  site `optiweb-studio-0`. The hosts report that they built. What they serve
+  was not seen. The Vercel connector has no access to the team's projects, so
+  build logs and settings could not be read either.
+- **Firefox, Safari and Edge.** The automated browsers are Chrome and
+  Chromium. Edge has the same engine and was not run. The paths Firefox and
+  Safari need are tested by taking the feature away from Chromium, not in
+  those browsers.
+- **Phones and low-memory devices.** The limits for 2 GB and 4 GB devices are
+  tested as arithmetic and by telling the page it runs on such a device, not on
+  real hardware.
+- **Speed on other machines.** The times above are from one two-core machine.
+- **Screen readers.** The accessibility suite checks structure and colour.
+  Nobody has listened to the app.
+
+## Known gaps
+
+- Borders of inputs and secondary buttons are below the 3:1 contrast that
+  WCAG 1.4.11 asks of a control's boundary. See
+  [docs/design-tokens.md](docs/design-tokens.md).
+- The rate limit of the audit is counted per server instance, so on a
+  serverless host it slows one client down but is not a hard quota.
+- The audit does not run a page's JavaScript.
+- CI reports the audit of a page with resources on other hosts as a notice.
+  If that stopped working, no run would fail; the notice would say so.
+- A commit pushed before its pull request is opened has no deploy previews,
+  so CI has no deployed copy of it to check. The next push is checked.
+- The repository, the app directory and the hosting projects keep the name
+  "optiweb". The production address and the social preview URL carry it until
+  the project or its domain is renamed on the host.
+
+## To do on the hosts
+
+1. **Vercel: promote the newest deployment of `main`.** Project → Deployments →
+   newest `main` deployment → **Promote to Production** (or **Undo Rollback**).
+   The production address serves a deployment of the first commit and ignores
+   new ones until this is done. No change to the repository can fix it.
+2. **Delete the variables the app no longer reads**: `MONGODB_URI`,
+   `BLOB_READ_WRITE_TOKEN`, `CRON_SECRET`, `CLIENT_ORIGIN`,
+   `VITE_API_BASE_URL`, and the `OW_STORAGE_*` and `OW_REQUEST_*` settings.
+3. **Rotate the database password** that was shared earlier, at the provider.
+   The app no longer uses the database, but the password stays valid until it
+   is changed there.
+4. The CI run on `main` checks production with the smoke test, in its job
+   "Deployed site serves this build". It fails until step 1 is done. Run it
+   again afterwards: Actions → CI → Run workflow.

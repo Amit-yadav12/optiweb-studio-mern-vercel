@@ -1,16 +1,26 @@
-import { useEffect, useState } from "react";
-import { Check, Loader2, Save, ShieldAlert } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Check, RotateCcw, Save } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { ErrorState, StatusBadge, useToast } from "@/components/ui/Feedback";
+import { Notice, StatusBadge, useToast } from "@/components/ui/Feedback";
 import { Field, Input, Select } from "@/components/ui/Form";
 import { DefinitionRow, Panel, PanelHeader } from "@/components/ui/Layout";
-import { ApiClientError, api } from "@/lib/api-client";
-import { formatBytes, formatDateTime } from "@/lib/format";
-import { useServerLimits } from "@/lib/limits";
-import type { FontDisplayPolicy, ImageFormat, Preferences } from "@/types/domain";
+import { DIMENSION_MAX, DIMENSION_MIN, QUALITY_MAX, QUALITY_MIN, clampDimension } from "@/features/images/engine/plan";
+import type { FormatChoice, Strategy } from "@/features/images/engine/types";
+import {
+  DEFAULT_PREFERENCES,
+  THRESHOLD_KB_MAX,
+  THRESHOLD_KB_MIN,
+  normalizePreferences,
+  resetPreferences,
+  savePreferences,
+  usePreferences,
+  type Preferences,
+} from "@/lib/preferences";
+import { CSS_DRAFT_STORAGE_KEY, PREFERENCES_STORAGE_KEY, REDUCE_MOTION_CLASS, THEME_STORAGE_KEY } from "@/lib/storage-keys";
+import type { FontDisplayPolicy } from "@/shared/css";
 
-const FORMATS: Array<{ value: ImageFormat; label: string }> = [
+const FORMATS: Array<{ value: FormatChoice; label: string }> = [
   { value: "webp", label: "WebP (default)" },
   { value: "avif", label: "AVIF" },
   { value: "jpeg", label: "JPEG" },
@@ -18,93 +28,95 @@ const FORMATS: Array<{ value: ImageFormat; label: string }> = [
   { value: "original", label: "Keep source format" },
 ];
 
-const POLICIES: Array<{ value: FontDisplayPolicy; label: string }> = [
-  { value: "swap", label: "swap — fallback shows immediately (default)" },
-  { value: "fallback", label: "fallback — short block, short swap" },
-  { value: "optional", label: "optional — browser may keep the fallback" },
-  { value: "block", label: "block — invisible up to ~3s" },
-  { value: "auto", label: "auto — browser default" },
+const STRATEGIES: Array<{ value: Strategy; label: string }> = [
+  { value: "single", label: "Single: write the chosen format (default)" },
+  { value: "best-effort", label: "Best-effort: smallest of WebP, AVIF and JPEG" },
+  { value: "no-regression", label: "No-regression: never larger than the original" },
 ];
 
-export function SettingsForm({ defaults }: { defaults: Preferences }) {
-  const { push } = useToast();
-  const { limits, known } = useServerLimits();
-  const image = limits.image;
-  const [form, setForm] = useState<Preferences>(defaults);
-  const [status, setStatus] = useState<"idle" | "saving" | "saved">("idle");
-  const [failure, setFailure] = useState<{ message: string; hint?: string } | null>(null);
-  const [session, setSession] = useState<{ shortCode: string; issued: boolean } | null>(null);
-  const [confirmClear, setConfirmClear] = useState(false);
-  const [clearing, setClearing] = useState(false);
+const POLICIES: Array<{ value: FontDisplayPolicy; label: string }> = [
+  { value: "swap", label: "swap: fallback shows immediately (default)" },
+  { value: "fallback", label: "fallback: short block, short swap" },
+  { value: "optional", label: "optional: browser may keep the fallback" },
+  { value: "block", label: "block: invisible up to ~3s" },
+  { value: "auto", label: "auto: browser default" },
+];
 
-  useEffect(() => {
-    api
-      .get<Preferences>("/api/v1/preferences")
-      .then((stored) => setForm(stored))
-      .catch(() => {
-        /* keep built-in defaults */
-      });
-    api
-      .get<{ shortCode: string; issued: boolean }>("/api/v1/session")
-      .then(setSession)
-      .catch(() => setSession(null));
+const same = (a: Preferences, b: Preferences) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * The settings form. Settings are saved in this browser's localStorage and
+ * nowhere else.
+ */
+export function SettingsForm() {
+  const { push } = useToast();
+  const stored = usePreferences();
+  const [form, setForm] = useState<Preferences>(stored);
+  const [width, setWidth] = useState<string>(stored.defaultMaxWidth ? String(stored.defaultMaxWidth) : "");
+  const [justSaved, setJustSaved] = useState(false);
+  const [notStored, setNotStored] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (savedTimer.current) clearTimeout(savedTimer.current);
   }, []);
 
-  const save = async () => {
-    setStatus("saving");
-    setFailure(null);
-    try {
-      const saved = await api.put<Preferences>("/api/v1/preferences", {
-        defaultImageFormat: form.defaultImageFormat,
-        defaultQuality: form.defaultQuality,
-        defaultMaxWidth: form.defaultMaxWidth,
-        fontDisplayPolicy: form.fontDisplayPolicy,
-        analyzerThresholdKb: form.analyzerThresholdKb,
-        reduceMotion: form.reduceMotion,
-      });
-      setForm(saved);
-      setStatus("saved");
-      push({ tone: "ok", title: "Defaults saved", description: "New jobs start from these values." });
-      setTimeout(() => setStatus("idle"), 2000);
-    } catch (error) {
-      const message = error instanceof ApiClientError ? error.message : "The settings could not be saved.";
-      setFailure({ message, hint: error instanceof ApiClientError ? error.hint : undefined });
-      setStatus("idle");
-      push({ tone: "danger", title: "Save failed", description: message });
-    }
+  const widthValue = width === "" ? null : Number(width);
+  const widthInvalid = widthValue !== null && (widthValue < DIMENSION_MIN || widthValue > DIMENSION_MAX);
+  const draft = normalizePreferences({ ...form, defaultMaxWidth: widthInvalid ? stored.defaultMaxWidth : clampDimension(widthValue) });
+  const dirty = !same(draft, stored);
+
+  const save = () => {
+    if (widthInvalid) return;
+    const ok = savePreferences(draft);
+    document.documentElement.classList.toggle(REDUCE_MOTION_CLASS, draft.reduceMotion);
+    setForm(draft);
+    setNotStored(!ok);
+    setJustSaved(true);
+    if (savedTimer.current) clearTimeout(savedTimer.current);
+    savedTimer.current = setTimeout(() => setJustSaved(false), 2000);
+    push(
+      ok
+        ? { tone: "ok", title: "Settings saved in this browser", description: "The tools start from these values." }
+        : { tone: "warn", title: "Settings applied, but not stored", description: "This browser refused to store them. They apply until the page is reloaded." },
+    );
   };
 
-  const clearHistory = async () => {
-    setClearing(true);
-    try {
-      const result = await api.del<{ removed: number }>("/api/v1/history");
-      push({ tone: "ok", title: "Session cleared", description: `${result.removed} job${result.removed === 1 ? "" : "s"} removed.` });
-    } catch (error) {
-      const message = error instanceof ApiClientError ? error.message : "History could not be cleared.";
-      push({ tone: "danger", title: "Clear failed", description: message });
-    } finally {
-      setClearing(false);
-      setConfirmClear(false);
-    }
+  const reset = () => {
+    resetPreferences();
+    document.documentElement.classList.remove(REDUCE_MOTION_CLASS);
+    setForm({ ...DEFAULT_PREFERENCES });
+    setWidth("");
+    setNotStored(false);
+    setConfirmReset(false);
+    push({ tone: "ok", title: "Settings reset", description: "The stored settings were removed from this browser." });
   };
+
+  const isDefault = same(stored, { ...DEFAULT_PREFERENCES });
 
   return (
     <div className="flex flex-col gap-6">
-      <Panel aria-labelledby="optimizer-defaults">
+      <Panel labelledBy="optimizer-defaults">
         <PanelHeader
           id="optimizer-defaults"
           title="Optimizer defaults"
-          description="Applied to every new job in this session. Changing them does not alter results already produced."
-          meta={form.updatedAt ? <StatusBadge tone="neutral">saved {formatDateTime(form.updatedAt)}</StatusBadge> : <StatusBadge tone="accent">built-in defaults</StatusBadge>}
+          description="The Image Optimizer starts from these values. Changing them does not alter results already produced."
+          meta={<StatusBadge tone={isDefault ? "accent" : "neutral"}>{isDefault ? "built-in defaults" : "saved in this browser"}</StatusBadge>}
         />
         <div className="grid gap-5 md:grid-cols-2">
-          <Field label="Default output format" htmlFor="pref-format" hint="Used by the Image Optimizer on load.">
-            <Select
-              id="pref-format"
-              value={form.defaultImageFormat}
-              onChange={(event) => setForm({ ...form, defaultImageFormat: event.target.value as ImageFormat })}
-            >
+          <Field label="Default output format" htmlFor="pref-format" hint="Used when the strategy writes a single format.">
+            <Select id="pref-format" value={form.defaultImageFormat} onChange={(event) => setForm({ ...form, defaultImageFormat: event.target.value as FormatChoice })}>
               {FORMATS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Default strategy" htmlFor="pref-strategy" hint="How the result is chosen for each file.">
+            <Select id="pref-strategy" value={form.defaultStrategy} onChange={(event) => setForm({ ...form, defaultStrategy: event.target.value as Strategy })}>
+              {STRATEGIES.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
@@ -114,14 +126,14 @@ export function SettingsForm({ defaults }: { defaults: Preferences }) {
           <Field
             label="Default quality"
             htmlFor="pref-quality"
-            hint="30 is aggressively small, 100 is closest to the source."
+            hint={`${QUALITY_MIN} is aggressively small, ${QUALITY_MAX} is closest to the source.`}
             trailing={<span className="font-mono text-xs text-muted tnum">{form.defaultQuality}</span>}
           >
             <input
               id="pref-quality"
               type="range"
-              min={30}
-              max={100}
+              min={QUALITY_MIN}
+              max={QUALITY_MAX}
               value={form.defaultQuality}
               onChange={(event) => setForm({ ...form, defaultQuality: Number(event.target.value) })}
               className="mt-2.5 h-1.5 w-full accent-accent"
@@ -131,45 +143,18 @@ export function SettingsForm({ defaults }: { defaults: Preferences }) {
             label="Default max width (px)"
             htmlFor="pref-width"
             hint="Leave empty to keep the source dimensions. Images are never enlarged."
+            error={widthInvalid ? `Enter a width between ${DIMENSION_MIN} and ${DIMENSION_MAX.toLocaleString("en-US")}, or leave it empty.` : null}
           >
-            <Input
-              id="pref-width"
-              inputMode="numeric"
-              placeholder="e.g. 1920"
-              value={form.defaultMaxWidth ?? ""}
-              onChange={(event) => {
-                const raw = event.target.value.replace(/[^\d]/g, "");
-                setForm({ ...form, defaultMaxWidth: raw ? Number(raw) : null });
-              }}
-            />
+            <Input id="pref-width" inputMode="numeric" placeholder="e.g. 1920" value={width} invalid={widthInvalid} onChange={(event) => setWidth(event.target.value.replace(/[^\d]/g, "").slice(0, 5))} />
           </Field>
-          <Field
-            label="Analyzer size threshold"
-            htmlFor="pref-threshold"
-            hint="Files above this size are flagged as large. It is a heuristic, not a rule."
-            trailing={<span className="font-mono text-xs text-muted tnum">{form.analyzerThresholdKb} KB</span>}
-          >
-            <input
-              id="pref-threshold"
-              type="range"
-              min={50}
-              max={4000}
-              step={50}
-              value={form.analyzerThresholdKb}
-              onChange={(event) => setForm({ ...form, analyzerThresholdKb: Number(event.target.value) })}
-              className="mt-2.5 h-1.5 w-full accent-accent"
-            />
-          </Field>
-          <Field
-            label="CSS font-display policy"
-            htmlFor="pref-policy"
-            hint="The value inserted by the Font Optimizer. No single value is best for every project."
-          >
-            <Select
-              id="pref-policy"
-              value={form.fontDisplayPolicy}
-              onChange={(event) => setForm({ ...form, fontDisplayPolicy: event.target.value as FontDisplayPolicy })}
-            >
+        </div>
+      </Panel>
+
+      <Panel labelledBy="analysis-defaults">
+        <PanelHeader id="analysis-defaults" title="Analysis defaults" description="Used by the Font Optimizer and the Asset Analyzer." />
+        <div className="grid gap-5 md:grid-cols-2">
+          <Field label="font-display policy" htmlFor="pref-policy" hint="The value the Font Optimizer proposes for rules that have none.">
+            <Select id="pref-policy" value={form.fontDisplayPolicy} onChange={(event) => setForm({ ...form, fontDisplayPolicy: event.target.value as FontDisplayPolicy })}>
               {POLICIES.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
@@ -177,97 +162,64 @@ export function SettingsForm({ defaults }: { defaults: Preferences }) {
               ))}
             </Select>
           </Field>
-          <Field label="Motion" htmlFor="pref-motion" hint="Reduces non-essential interface animation. Your system setting is always respected.">
-            <label htmlFor="pref-motion" className="flex h-9.5 items-center gap-2.5 text-sm text-ink">
-              <input
-                id="pref-motion"
-                type="checkbox"
-                checked={form.reduceMotion}
-                onChange={(event) => setForm({ ...form, reduceMotion: event.target.checked })}
-                className="size-4 accent-accent"
-              />
-              Minimise interface motion
-            </label>
+          <Field label="Large-file threshold (KB)" htmlFor="pref-threshold" hint={`The Asset Analyzer flags files above this size. ${THRESHOLD_KB_MIN}–${THRESHOLD_KB_MAX.toLocaleString("en-US")}.`}>
+            <Input
+              id="pref-threshold"
+              inputMode="numeric"
+              value={String(form.analyzerThresholdKb)}
+              onChange={(event) => setForm({ ...form, analyzerThresholdKb: Number(event.target.value.replace(/[^\d]/g, "").slice(0, 5)) || 0 })}
+            />
           </Field>
         </div>
-
-        <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-line pt-4">
-          <Button variant="primary" onClick={save} loading={status === "saving"} leading={status === "saved" ? <Check className="size-3.5" aria-hidden /> : <Save className="size-3.5" aria-hidden />}>
-            {status === "saved" ? "Saved" : "Save defaults"}
-          </Button>
-          <Button variant="ghost" onClick={() => setForm(defaults)} disabled={status === "saving"}>
-            Reset to built-ins
-          </Button>
-        </div>
-
-        {failure ? (
-          <div className="mt-4">
-            <ErrorState title="Save failed" message={failure.message} hint={failure.hint} />
-          </div>
-        ) : null}
+        <label className="mt-5 flex cursor-pointer items-start gap-3 border-t border-line pt-4">
+          <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={form.reduceMotion} onChange={(event) => setForm({ ...form, reduceMotion: event.target.checked })} />
+          <span>
+            <span className="block text-sm font-medium text-ink">Reduce motion</span>
+            <span className="mt-0.5 block text-xs leading-relaxed text-muted">
+              Turns off the interface's animations. A system-wide "reduce motion" setting is always respected, whatever is chosen here.
+            </span>
+          </span>
+        </label>
       </Panel>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Panel aria-labelledby="session-data">
-          <PanelHeader
-            id="session-data"
-            title="This session"
-            description="OptiWeb has no accounts. An anonymous cookie identifies your session so history stays private to you."
-          />
-          <dl>
-            <DefinitionRow label="Session" value={session?.shortCode ?? "not issued yet"} />
-            <DefinitionRow label="Mode" value="guest" />
-            <DefinitionRow label="Converted files kept" value={known ? `${Math.round((image?.artifactTtlHours ?? limits.artifactTtlHours) / 24)} days` : "…"} />
-            <DefinitionRow label="Uploaded bytes kept" value="none — only produced results" />
-          </dl>
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <Button variant="danger" size="sm" onClick={() => setConfirmClear(true)} leading={<ShieldAlert className="size-3.5" aria-hidden />}>
-              Clear session history
-            </Button>
-            {clearing ? (
-              <span className="flex items-center gap-1.5 text-xs text-muted">
-                <Loader2 className="size-3.5 animate-spin" aria-hidden />
-                Clearing…
-              </span>
-            ) : null}
-          </div>
-        </Panel>
+      {notStored ? (
+        <Notice tone="warn" title="This browser did not store the settings">
+          <p>They apply to this page until it is reloaded. Private browsing modes and a blocked site storage cause this.</p>
+        </Notice>
+      ) : null}
 
-        <Panel aria-labelledby="limits">
-          <PanelHeader id="limits" title="Enforced limits" description="These are validated on the server; the interface mirrors them." />
-          {known ? (
-            <dl>
-              <DefinitionRow label="Upload mode" value={image?.mode === "direct" ? "Direct to storage, background job" : "Inside the request"} mono={false} />
-              <DefinitionRow label="Max file size" value={formatBytes(image?.maxFileBytes ?? limits.maxFileBytes)} />
-              <DefinitionRow label="Max files per batch" value={String(image?.maxFiles ?? limits.maxFilesPerRequest)} />
-              {image ? <DefinitionRow label="Max batch size" value={formatBytes(image.maxBatchBytes)} /> : null}
-              <DefinitionRow label="Decoded pixels per image" value={`${Math.round((image?.maxDecodedPixels ?? limits.maxDecodedPixels) / 1_000_000)} MP`} />
-              {image?.maxJobPixels ? <DefinitionRow label="Decoded pixels per batch" value={`${Math.round(image.maxJobPixels / 1_000_000)} MP`} /> : null}
-              {image?.avifMaxPixels ? <DefinitionRow label="Largest AVIF output" value={`${Math.round(image.avifMaxPixels / 1_000_000)} MP`} /> : null}
-              {image?.sessionQuotaBytes ? <DefinitionRow label="Storage per session" value={formatBytes(image.sessionQuotaBytes)} /> : null}
-              {image?.maxActiveJobs ? <DefinitionRow label="Jobs in progress" value={`up to ${image.maxActiveJobs}`} mono={false} /> : null}
-              <DefinitionRow label="Converted files kept" value={`${Math.round((image?.artifactTtlHours ?? limits.artifactTtlHours) / 24)} days`} mono={false} />
-              {image?.sourceTtlHours ? <DefinitionRow label="Source uploads kept" value={`${image.sourceTtlHours} hours after the job`} mono={false} /> : null}
-              <DefinitionRow label="Quality range" value="30 – 100" />
-              <DefinitionRow label="Dimension cap" value="8000 px" />
-              {limits.maxCssChars ? <DefinitionRow label="CSS length cap" value={`${limits.maxCssChars.toLocaleString("en-US")} characters`} /> : null}
-              {limits.maxAssetFiles ? <DefinitionRow label="Files per asset analysis" value={String(limits.maxAssetFiles)} /> : null}
-            </dl>
-          ) : (
-            <p className="text-sm text-muted">The limits are loaded from the server.</p>
-          )}
-        </Panel>
+      <div className="flex flex-wrap items-center gap-3">
+        <Button variant="primary" size="lg" onClick={save} disabled={!dirty || widthInvalid} leading={justSaved ? <Check className="size-4" aria-hidden /> : <Save className="size-4" aria-hidden />}>
+          {justSaved && !dirty ? "Saved" : "Save settings"}
+        </Button>
+        <Button variant="ghost" size="lg" onClick={() => setConfirmReset(true)} disabled={isDefault && !dirty} leading={<RotateCcw className="size-3.5" aria-hidden />}>
+          Reset to defaults
+        </Button>
+        {dirty ? <p className="text-xs text-muted">You have changes that are not saved.</p> : null}
       </div>
 
+      <Panel as="aside" labelledBy="stored-here">
+        <PanelHeader id="stored-here" title="What this site keeps in your browser" description="Everything it stores is listed here. There are no cookies, no account and no copy on a server." />
+        <dl>
+          <DefinitionRow label="Settings on this page" value={`localStorage · ${PREFERENCES_STORAGE_KEY}`} />
+          <DefinitionRow label="Light or dark theme, when you choose one" value={`localStorage · ${THEME_STORAGE_KEY}`} />
+          <DefinitionRow label="Stylesheet draft in the Font Optimizer" value={`sessionStorage · ${CSS_DRAFT_STORAGE_KEY}`} />
+          <DefinitionRow label="Images, results and analysis" value="this tab's memory only" />
+        </dl>
+        <p className="mt-3 text-xs leading-relaxed text-muted">
+          The stylesheet draft is removed when the tab closes. Files you select and the results made from them are never written to storage: they are gone
+          when you leave the page.
+        </p>
+      </Panel>
+
       <ConfirmDialog
-        open={confirmClear}
-        title="Clear all session history?"
-        description="Every job record and stored artifact for this session will be deleted. Your preferences are kept."
-        confirmLabel="Clear history"
+        open={confirmReset}
+        title="Reset settings to their defaults?"
+        description="The settings stored in this browser are removed. Results on other pages of this tab are not affected."
+        confirmLabel="Reset"
         tone="danger"
-        loading={clearing}
-        onCancel={() => setConfirmClear(false)}
-        onConfirm={clearHistory}
+        onConfirm={reset}
+        onCancel={() => setConfirmReset(false)}
       />
     </div>
   );

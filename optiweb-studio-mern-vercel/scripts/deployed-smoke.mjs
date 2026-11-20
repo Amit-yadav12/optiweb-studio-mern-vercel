@@ -1,52 +1,55 @@
 #!/usr/bin/env node
 /**
- * Smoke test for a running site. It uses only public HTTP requests, so it can
- * be pointed at production, a preview or a local server.
+ * Smoke test for a running site. It uses only public HTTP requests and needs
+ * nothing but Node, so it can be pointed at production, a preview or a local
+ * server.
  *
- *   node scripts/deployed-smoke.mjs <base-url> [--expect-build] [--wait <seconds>]
+ *   node scripts/deployed-smoke.mjs <base-url> [--expect-build] [--wait <seconds>] [--audit <page-url>]
  *
  * It answers the questions a broken deployment raises:
  *
  *  - Is the site serving this build? With `--expect-build` the app script the
  *    page loads is compared with the one in the local `dist/` (run
  *    `npm run build` first). `--wait` keeps checking for that many seconds, for
- *    a deployment that is still in progress. A site left on a deployment with
- *    different browser code fails here. Two deployments that differ only in
- *    server code load the same script, so this comparison cannot tell them
- *    apart; the API checks below then describe whichever one is live.
+ *    a deployment that is still in progress. A site left on an older
+ *    deployment fails here, with the name of the script it serves.
  *  - Does a deep link such as /app/images load the app?
- *  - Is the API deployed? Every /api path must answer with the API's JSON. A
- *    host's own "not found" page means the server function is missing.
- *  - Can an image be converted and the converted file downloaded: by URL when
- *    it was stored, or from the response when it was not?
- *  - When the site reports direct uploads: does a background job work end to
- *    end? The script creates a job, uploads one file of about 6 MB straight
- *    to object storage with the authorization the site issues (Vercel Blob,
- *    or the local driver on a development server), confirms it, follows the
- *    job and downloads the result. Both the upload and the download are
- *    larger than the 4.5 MB a function request or a buffered response can
- *    carry, so this passes only if the file bypasses the function on the way
- *    in and is streamed on the way out. It is the only check here that
- *    exercises the real storage service.
+ *  - Are the files the image tool needs served, with the right types? The
+ *    script follows the app's own references to the worker and the AVIF codec.
+ *  - Is the security policy in force that stops the page from sending data to
+ *    any other origin?
+ *  - Is the API deployed, and is it the API of this version: one that accepts
+ *    no file and stores nothing? A host's own "not found" page means the
+ *    server function is missing.
+ *  - Does the one server-side tool, the website audit, refuse private
+ *    addresses, and (on a public address) can it read a page?
  *
- * It uploads small generated images and changes nothing else. Database
- * readiness is reported but does not fail the run, because conversion and
- * download work without a database.
+ * With `--audit <page-url>` it also asks the site to audit that page, and
+ * reports how many of the page's resources on other hosts the audit could
+ * read. The site's own home page cannot show that: its files are all on one
+ * host. This is an observation and never a failure: the page belongs to someone
+ * else, and a test of this site must not fail because another site is slow,
+ * down, or refuses the request.
+ *
+ * It sends one small generated image to prove that uploads are refused, and
+ * asks for at most four audits. It changes nothing on the site.
  */
 import fs from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
-import { put } from "@vercel/blob/client";
-import sharp from "sharp";
-import { createChecker, imageForm, jpegImage } from "./lib/selftest-kit.mjs";
+import { isIP } from "node:net";
+import { createChecker, solidPng } from "./lib/selftest-kit.mjs";
 
 const args = process.argv.slice(2);
-const base = (args.find((arg) => /^https?:\/\//.test(arg)) ?? "").replace(/\/+$/, "");
+/** The word after a flag, or null when the flag is absent or last. */
+const valueOf = (flag) => (args.includes(flag) ? (args[args.indexOf(flag) + 1] ?? null) : null);
+const isAddress = (value) => /^https?:\/\/[^/\s]+/.test(value ?? "");
+const auditPage = valueOf("--audit");
+const base = (args.find((arg, index) => isAddress(arg) && args[index - 1] !== "--audit") ?? "").replace(/\/+$/, "");
 const expectBuild = args.includes("--expect-build");
-const waitIndex = args.indexOf("--wait");
-const waitSeconds = waitIndex >= 0 ? Number(args[waitIndex + 1]) || 0 : 0;
+const waitSeconds = Number(valueOf("--wait")) || 0;
 
-if (!base) {
-  console.error("Usage: node scripts/deployed-smoke.mjs <base-url> [--expect-build] [--wait <seconds>]");
+if (!base || (args.includes("--audit") && !isAddress(auditPage))) {
+  console.error("Usage: node scripts/deployed-smoke.mjs <base-url> [--expect-build] [--wait <seconds>] [--audit <page-url>]");
   process.exit(2);
 }
 
@@ -73,12 +76,13 @@ async function request(path, init = {}) {
     }
     return { status: response.status, type, bytes, json, headers: response.headers, text: /json|text|javascript/.test(type) ? bytes.toString("utf8") : "" };
   } catch (error) {
-    return { status: 0, type: "", bytes: Buffer.alloc(0), json: null, headers: null, text: "", error: error instanceof Error ? error.name : "request failed" };
+    return { status: 0, type: "", bytes: Buffer.alloc(0), json: null, headers: new Headers(), text: "", error: error instanceof Error ? error.name : "request failed" };
   }
 }
 
 /** What a response was, in a few words, for a failure message. */
-const seen = (response) => (response.status === 0 ? `no response (${response.error})` : `HTTP ${response.status}, ${response.type || "no content type"}`);
+const seen = (response) => (response.status === 0 ? `no response (${response.error})` : `HTTP ${response.status}, ${response.type || "no content type"}${response.json?.error?.code ? `, ${response.json.error.code}` : ""}`);
+const kb = (bytes) => `${(bytes / 1024).toFixed(bytes < 10_240 ? 1 : 0)} KB`;
 
 /* --------------------------------------------------------------- the build */
 section(`${base}: the app`);
@@ -104,117 +108,143 @@ if (expected) {
   check(
     "the site serves the app script of this build",
     served === expected,
-    `expected ${expected}, the site serves ${served ?? "no app script"}. If the deployment of this commit has finished, another deployment is assigned to this address: promote the new one in the hosting dashboard. A build made with different VITE_* variables also has a different script name.`,
+    `expected ${expected}, the site serves ${served ?? "no app script"}. If the deployment of this commit has finished, another deployment is assigned to this address: promote the new one in the hosting dashboard.`,
   );
 }
+check("the page is Unikit Studio", /<title>Unikit Studio\b/.test(home.text), /<title>([^<]*)<\/title>/.exec(home.text)?.[1] ?? "no title");
 
 const deepLink = await request("/app/images");
 check("a deep link (/app/images) loads the same app", deepLink.status === 200 && served !== null && deepLink.text.includes(served), seen(deepLink));
 
+const policy = home.headers.get("content-security-policy") ?? "";
+const directive = (name) => new RegExp(`(?:^|;)\\s*${name}\\s+([^;]*)`).exec(policy)?.[1]?.trim() ?? null;
+check("the page is sent with a content security policy", policy.length > 0, "no Content-Security-Policy header: the host's header rules are not applied");
+check("the policy lets the page connect to its own origin only, so no file can be sent anywhere else", directive("connect-src") === "'self'" && directive("default-src") === "'self'" && directive("form-action") === "'self'", policy.slice(0, 200));
+check("the policy allows the image codec (WebAssembly) and no script from elsewhere", directive("script-src") === "'self' 'wasm-unsafe-eval'" && directive("object-src") === "'none'", directive("script-src") ?? "no script-src");
+check("the page cannot be framed, and content types are not guessed", directive("frame-ancestors") === "'none'" && home.headers.get("x-content-type-options") === "nosniff");
+check("the page sets no cookie", home.headers.get("set-cookie") === null && deepLink.headers.get("set-cookie") === null);
+
+const missing = await request(`/assets/not-in-this-build-${Date.now().toString(36)}.js`);
+check("a build file that does not exist is a 404, not the app's page", missing.status === 404 && !/html/.test(missing.type), seen(missing));
+
+/* ------------------------------------------------------- the image tool's files */
+section("the files the image tool loads");
+{
+  // Follow the app's own references: entry script, then its chunks, to the worker and the codec.
+  const NAME = /[\w.-]+-[\w-]{8}\.(?:js|wasm)\b/g;
+  const entry = served ? served.replace("/assets/", "") : "";
+  const queue = entry ? [entry] : [];
+  const scripts = new Map();
+  const codecs = new Set();
+  while (queue.length > 0 && scripts.size < 80) {
+    const name = queue.shift();
+    if (scripts.has(name)) continue;
+    const response = await request(`/assets/${name}`);
+    scripts.set(name, response);
+    if (response.status !== 200) continue;
+    for (const match of response.text.match(NAME) ?? []) {
+      if (match.endsWith(".wasm")) codecs.add(match);
+      else if (!scripts.has(match)) queue.push(match);
+    }
+  }
+  const broken = [...scripts].filter(([, response]) => response.status !== 200 || !/javascript/.test(response.type)).map(([name, response]) => `${name}: ${seen(response)}`);
+  check(`every script the app refers to is served as JavaScript (${scripts.size} files)`, scripts.size > 3 && broken.length === 0, broken.slice(0, 4).join("; "));
+  const cached = scripts.get(entry)?.headers.get("cache-control") ?? "";
+  check("build files are cached as immutable", /immutable/.test(cached) && /max-age=31536000/.test(cached), cached || "no Cache-Control");
+  const worker = [...scripts.keys()].find((name) => /^worker-/.test(name));
+  check("the image worker is one of them", Boolean(worker), [...scripts.keys()].join(" ").slice(0, 200));
+  const avif = [...codecs].find((name) => /^avif_enc/.test(name));
+  check("the app refers to its AVIF encoder", Boolean(avif), [...codecs].join(" "));
+  for (const name of codecs) {
+    const response = await request(`/assets/${name}`);
+    const isWasm = response.bytes.subarray(0, 4).equals(Buffer.from([0x00, 0x61, 0x73, 0x6d]));
+    check(`${name} is served as application/wasm (${kb(response.bytes.length)})`, response.status === 200 && response.type.startsWith("application/wasm") && isWasm, seen(response));
+  }
+}
+
 /* ----------------------------------------------------------------- the API */
 section("the API");
 const health = await request("/api/v1/health");
-const database = health.json?.data?.database;
+const data = health.json?.data;
 const apiDeployed = check(
   "/api/v1/health answers with the API's JSON",
-  health.status === 200 && health.json?.ok === true && typeof database === "object" && database !== null,
+  health.status === 200 && health.json?.ok === true && typeof data === "object" && data !== null,
   `${seen(health)}. An answer that is not JSON comes from the host: the server function is not deployed.`,
 );
+check(
+  "it is the API of this version: it accepts no file, stores nothing and sets no cookie",
+  data?.acceptsFileUploads === false && data?.storesFiles === false && data?.usesCookies === false && data?.processing?.images === "browser",
+  data ? `the answer has ${Object.keys(data).join(", ")}: an older version is deployed` : "no answer",
+);
+check("it reports no database and no storage", data !== undefined && data !== null && !("database" in data) && !("storage" in data));
+check("the API sets no cookie", health.headers.get("set-cookie") === null);
+if (apiDeployed) note(`${data.service ?? "service"} ${data.version ?? ""}; audit limits: ${data.audit?.maxPages ?? "?"} pages, ${data.audit?.maxResourcesPerPage ?? "?"} resources per page; PageSpeed ${data.audit?.pagespeedConfigured ? "configured" : "not configured"}`);
 const unknown = await request("/api/v1/does-not-exist");
 check("an unknown /api path is answered by the API, not by the host", unknown.status === 404 && unknown.json?.error?.code === "not_found", seen(unknown));
-const limits = await request("/api/v1/limits");
-check("/api/v1/limits reports the upload limits", limits.status === 200 && Number.isFinite(limits.json?.data?.maxFilesPerRequest), seen(limits));
+const removed = await request("/api/v1/history");
+check("an endpoint of the earlier, storing version answers 410 Gone", removed.status === 410 && removed.json?.error?.code === "gone", seen(removed));
 
-const databaseReady = database?.ready ?? database?.connected ?? false;
-if (apiDeployed) note(`database ${databaseReady ? "ready" : `not ready${database?.category ? ` (${database.category})` : ""}`}`);
-
-/* -------------------------------------------------- convert and download */
-section("convert an image and download the result");
-const source = await jpegImage(320, 200, { r: 36, g: 92, b: 230 });
-const upload = await request("/api/v1/images/optimize", { method: "POST", body: imageForm([{ name: "smoke-test.jpg", data: source, type: "image/jpeg" }], { format: "webp" }) });
-const data = upload.json?.data;
-const result = data?.results?.[0];
-check("the upload is converted to WebP", upload.status === 200 && result?.status === "completed" && result.outputFormat === "webp" && result.outputBytes > 0, `${seen(upload)}${upload.json?.error?.code ? `, ${upload.json.error.code}` : ""}`);
-
-let file = null;
-let route = "no download offered";
-if (data?.persisted === true && typeof result?.artifactId === "string") {
-  // Stored: the file is served by URL to the session that uploaded it.
-  const cookie = (upload.headers?.get("set-cookie") ?? "").split(";")[0];
-  const download = await request(`/api/v1/artifacts/${result.artifactId}?download=1`, { headers: cookie ? { cookie } : {} });
-  route = `stored, downloaded by URL (${seen(download)})`;
-  file = download.status === 200 ? download.bytes : null;
-} else if (data?.persisted === false && result?.inlineOutput?.encoding === "base64") {
-  // Not stored: the file came inside the response.
-  route = `not stored${data.storage?.category ? ` (${data.storage.category})` : ""}, sent with the response`;
-  file = Buffer.from(result.inlineOutput.data, "base64");
-}
-const image = file ? await sharp(file).metadata().catch(() => null) : null;
-check(
-  "the converted file can be downloaded and is the image the result describes",
-  file !== null && file.length === result?.outputBytes && image?.format === "webp" && image.width === result.outputWidth && image.height === result.outputHeight,
-  `${route}: ${file?.length ?? 0} bytes, ${image?.format ?? "not an image"}; the result reports ${result?.outputBytes ?? "no"} bytes`,
-);
-if (file) note(`converted ${source.length} → ${file.length} bytes; ${route}`);
-
-/* ------------------------------------------------- direct upload and job */
-const capacity = limits.json?.data?.image;
-if (capacity?.mode === "direct") {
-  section("direct upload: job, upload to object storage, worker, download");
-  let cookie = "";
-  /** A JSON request in one guest session, as a browser's cookie jar gives it. */
-  const api = async (method, pathname, body) => {
-    const response = await request(pathname, {
-      method,
-      headers: { ...(cookie ? { cookie } : {}), ...(body !== undefined ? { "content-type": "application/json" } : {}) },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-    cookie ||= (response.headers?.get("set-cookie") ?? "").split(";")[0];
-    return response;
+/* ----------------------------------------------------------------- uploads */
+section("uploads are refused");
+{
+  const canary = `smoke-${Date.now().toString(36)}`;
+  const form = () => {
+    const body = new FormData();
+    body.append("files", new Blob([solidPng(64, 48, [54, 92, 230])], { type: "image/png" }), `${canary}.png`);
+    body.append("format", "webp");
+    return body;
   };
-  // Noise does not compress, so this PNG, and the PNG made from it, are both above 4.5 MB.
-  const picture = await sharp({ create: { width: 1450, height: 1450, channels: 3, noise: { type: "gaussian", mean: 128, sigma: 70 } } }).png({ compressionLevel: 1 }).toBuffer();
-  const FUNCTION_BODY_LIMIT = 4.5 * 1024 * 1024;
-  const created = await api("POST", "/api/v1/jobs/image-optimization", { files: [{ name: "smoke-direct.png", type: "image/png", size: picture.length }], settings: { format: "png" } });
-  const item = created.json?.data?.job?.items?.[0];
-  check("a job is created for one file", created.status === 201 && typeof item?.id === "string", `${seen(created)}${created.json?.error?.code ? `, ${created.json.error.code}` : ""}`);
+  const old = await request("/api/v1/images/optimize", { method: "POST", body: form() });
+  check("an image sent to the old upload endpoint is not accepted (410)", old.status === 410 && old.json?.error?.code === "gone", seen(old));
+  const audits = await request("/api/v1/audits", { method: "POST", body: form() });
+  check("an image sent to the audit endpoint is not accepted (415)", audits.status === 415 && audits.json?.error?.code === "unsupported_media_type", seen(audits));
+  // A page address has no code behind it. This server refuses the request; a static host may refuse it or answer with the page. Either way nothing reads the body.
+  const page = await request("/app/images", { method: "POST", body: form() });
+  check("an image sent to a page address goes nowhere: it is refused, or answered with the page itself", (page.status >= 400 && page.status < 500) || (page.status === 200 && served !== null && page.text.includes(served)), seen(page));
+  check("no refusal repeats the file's name", [old, audits, page].every((response) => !response.bytes.includes(canary)));
+}
 
-  const token = item ? await api("POST", "/api/v1/uploads/token", { uploadId: item.id }) : null;
-  const grant = token?.json?.data?.upload;
-  check("an upload authorization is issued", token?.status === 200 && (grant?.transport === "vercel-blob" || grant?.transport === "local"), token ? seen(token) : "no job");
-
-  let sent = "not sent";
-  if (grant?.transport === "vercel-blob") {
-    // The same call a browser makes: straight to the storage service, with the short-lived client token.
-    sent = await put(grant.pathname, picture, { access: grant.access, token: grant.clientToken, contentType: grant.contentType, multipart: false }).then(() => "stored", (error) => `refused (${error?.name ?? "error"})`);
-  } else if (grant?.transport === "local") {
-    const stored = await request(grant.uploadUrl, { method: "PUT", headers: { cookie, "content-type": grant.contentType }, body: picture });
-    sent = stored.status === 200 ? "stored" : `refused (${seen(stored)})`;
+/* ------------------------------------------------------------------- audit */
+section("the website audit");
+{
+  const audit = (url) => request("/api/v1/audits", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url, extraPages: 0 }) });
+  const loopback = await audit("http://127.0.0.1/");
+  check("it refuses to fetch a loopback address", loopback.status === 400 && loopback.json?.error?.code === "bad_request", seen(loopback));
+  const metadata = await audit("http://169.254.169.254/latest/meta-data/");
+  check("it refuses to fetch the cloud metadata address", metadata.status === 400 && metadata.json?.error?.code === "bad_request", seen(metadata));
+  const host = new URL(base).hostname;
+  const isLocal = host === "localhost" || isIP(host.replace(/^\[|\]$/g, "")) !== 0;
+  if (isLocal) {
+    note("this is a local address, which the audit rightly refuses to fetch; auditing a public page is checked on a deployed site only");
+  } else {
+    const own = await audit(`${base}/`);
+    const report = own.json?.data;
+    check("it audits a public page: this site's own home page", own.status === 200 && report?.document?.status === 200 && Array.isArray(report?.resources) && report.resources.length > 0 && report.coverage?.javascriptRendered === false, `${seen(own)}${own.json?.error?.message ? `: ${own.json.error.message}` : ""}`);
+    if (report) note(`audit of ${base}/: ${report.resources.length} resources, ${kb(report.totals?.transferredBytes ?? 0)} read, ${report.durationMs} ms`);
   }
-  check(`the file is uploaded straight to object storage (${grant?.transport ?? "no transport"})`, sent === "stored", sent);
-
-  const confirmed = item ? await api("POST", "/api/v1/uploads/complete", { uploadId: item.id }) : null;
-  check("the upload is confirmed and the job is handed to the worker", confirmed?.status === 202 && confirmed.json?.data?.queued === true, confirmed ? `${seen(confirmed)}${confirmed.json?.error?.code ? `, ${confirmed.json.error.code}` : ""}` : "no job");
-
-  let job = confirmed?.json?.data?.job ?? null;
-  const jobDeadline = Date.now() + 120_000;
-  while (job && !["completed", "partial", "failed", "cancelled"].includes(job.state) && Date.now() < jobDeadline) {
-    await sleep(1_500);
-    job = (await api("GET", `/api/v1/jobs/${job.id}`)).json?.data?.job ?? job;
+  if (auditPage) {
+    // An observation, not a check: see the note on --audit at the top.
+    const other = await audit(auditPage);
+    const found = other.json?.data;
+    if (other.status !== 200 || !Array.isArray(found?.resources)) {
+      note(`audit of ${auditPage}: the page was not read (${seen(other)}${other.json?.error?.message ? `: ${other.json.error.message}` : ""}), so nothing was learned about resources on other hosts`);
+    } else {
+      const hostOf = (address) => { try { return new URL(address).host; } catch { return ""; } };
+      const pageHost = hostOf(found.fetchedUrl ?? auditPage);
+      const resources = found.resources.filter((row) => row.kind !== "document");
+      const elsewhere = resources.filter((row) => hostOf(row.url) !== pageHost);
+      const read = elsewhere.filter((row) => row.skipped === undefined && typeof row.status === "number" && row.status < 400);
+      const hosts = [...new Set(elsewhere.map((row) => hostOf(row.url)))];
+      const reasons = [...new Set(elsewhere.filter((row) => !read.includes(row)).map((row) => row.skipped ?? `HTTP ${row.status}`))];
+      note(
+        `audit of ${auditPage}: the page and ${resources.length} resources, ${elsewhere.length} of them on ${hosts.length === 1 ? "another host" : `${hosts.length} other hosts`}` +
+          `${hosts.length > 0 ? ` (${hosts.join(", ")})` : ""}; ${read.length} of those ${elsewhere.length} were read${reasons.length > 0 ? ` (the rest: ${reasons.join("; ")})` : ""}; ` +
+          `${kb(found.totals?.transferredBytes ?? 0)} in ${found.durationMs} ms`,
+      );
+    }
   }
-  const converted = job?.items?.[0];
-  check("the worker converts the file", job?.state === "completed" && converted?.state === "completed" && converted.result?.outputFormat === "png", `job ${job?.state ?? "missing"}${converted?.errorCode ? `, ${converted.errorCode}` : ""}`);
-
-  const fetched = converted?.artifactId ? await request(`/api/v1/artifacts/${converted.artifactId}?download=1`, { headers: { cookie } }) : null;
-  const picked = fetched?.status === 200 ? await sharp(fetched.bytes).metadata().catch(() => null) : null;
-  check("the result is streamed back to the session that owns it, complete", fetched?.status === 200 && fetched.bytes.length === converted.result.outputBytes && picked?.format === "png" && picked.width === 1450, fetched ? `${seen(fetched)}, ${fetched.bytes.length} bytes` : "no artifact");
-  check("the upload and the download were both larger than a function request or a buffered response may be", picture.length > FUNCTION_BODY_LIMIT && (fetched?.bytes.length ?? 0) > FUNCTION_BODY_LIMIT, `${picture.length} bytes up, ${fetched?.bytes.length ?? 0} bytes down`);
-  const stranger = converted?.artifactId ? await request(`/api/v1/artifacts/${converted.artifactId}?download=1`) : null;
-  check("a request without that session does not get the file", stranger?.status === 404, stranger ? seen(stranger) : "no artifact");
-  if (job?.state === "completed") note(`direct upload via ${grant?.transport}: ${picture.length} → ${converted.result.outputBytes} bytes in a background job`);
-} else if (apiDeployed) {
-  note(`direct uploads are not in effect (${capacity?.directUnavailableReason ?? "the site does not report a mode"}); the standard upload was tested`);
 }
 
 const ok = report();
+if (ok) console.log(`\n${base} passed the smoke test.`);
 process.exit(ok ? 0 : 1);

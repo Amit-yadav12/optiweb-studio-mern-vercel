@@ -14,8 +14,8 @@ import * as https from "node:https";
 import { limits } from "../config/env.js";
 import { badRequest, unprocessable } from "../http/errors.js";
 import { assertPublicHostname, assertPublicIp, parseHttpUrl, validateAuditUrl } from "../security/ssrf.js";
-import { sniffImage } from "./imageService.js";
-import { analyzeCss } from "./cssService.js";
+import { readImageHeader, displayedSize } from "../../shared/imageHeader.js";
+import { countFontDisplayGaps } from "../../shared/css.js";
 
 export type EvidenceKind = "measured" | "estimated" | "unavailable" | "not-applicable";
 
@@ -99,7 +99,7 @@ export type AuditReport = {
   };
 };
 
-const UA = "OptiWebStudio-Audit/1.0 (+https://optiweb.studio; lab document fetch)";
+const UA = "UnikitStudio-Audit/2.0 (static page audit; fetches the HTML document and the assets it names)";
 
 type PublicFetchResult = {
   status: number;
@@ -563,26 +563,22 @@ export async function runWebsiteAudit(rawUrl: string, options: AuditOptions = {}
       let height: number | null = null;
       let finding: string | undefined;
       if (kind === "image") {
-        try {
-          const sniffed = await sniffImage(fetched.body);
-          width = sniffed.width;
-          height = sniffed.height;
+        // Dimensions come from the file's header. The image is never decoded:
+        // bytes fetched from another site are not handed to an image decoder.
+        const header = readImageHeader(fetched.body);
+        if (header === null || header.malformed) {
+          finding = "The image's header could not be read.";
+        } else {
+          ({ width, height } = displayedSize(header));
           if (fetched.body.byteLength > 300 * 1024) {
             finding = `Image is ${(fetched.body.byteLength / 1024).toFixed(0)} KB. Test a WebP/AVIF conversion in the Image Optimizer.`;
           }
-        } catch {
-          finding = "Image bytes could not be decoded.";
         }
       }
       if (kind === "stylesheet") {
-        try {
-          const analysis = analyzeCss(fetched.body.toString("utf8"), "swap");
-          if (analysis.missingFontDisplay > 0) {
-            finding = `${analysis.missingFontDisplay} of ${analysis.fontFaceCount} @font-face rules lack font-display.`;
-          }
-        } catch {
-          finding = "Stylesheet could not be parsed.";
-        }
+        const gaps = countFontDisplayGaps(fetched.body.toString("utf8"));
+        if (gaps === null) finding = "Stylesheet could not be parsed.";
+        else if (gaps.missing > 0) finding = `${gaps.missing} of ${gaps.total} @font-face rules lack font-display.`;
       }
       if (finding) {
         findings.push({
