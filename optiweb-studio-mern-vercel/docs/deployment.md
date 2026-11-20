@@ -103,13 +103,26 @@ checks that:
 - the audit refuses a loopback address and the cloud metadata address, and, on
   a public site, can audit the site's own home page.
 
-CI runs the same script against the started server on every push, and against
-production after every push to `main`. To check another site from CI, for
-example a deploy preview of a pull request, start the workflow by hand and
-give its address:
+CI runs the same script on every push:
+
+- against the server started on the runner;
+- on a pull request branch, against the **deploy previews** that the hosts
+  built for the commit, so a change is checked on the hosts before it is
+  merged;
+- on `main`, against production.
+
+The previews are found from the statuses that the host reports on the commit
+(`scripts/deploy-previews.mjs`). A preview that failed to build fails the job.
+A preview that asks for a sign-in cannot be checked from outside; it is named
+in a notice and left out. Vercel's previews are of that kind, as are those of a
+Netlify site with protected previews. A commit pushed before its pull request
+was opened has no previews: the job passes with a notice that no deployed copy
+was checked, and the next push is checked.
+
+To check any other address, start the workflow by hand and give it:
 
 ```bash
-gh workflow run ci.yml --ref <branch> -f url=https://deploy-preview-123--your-site.netlify.app
+gh workflow run ci.yml --ref <branch> -f url=https://your-site.example
 ```
 
 The production address CI checks is the repository variable `PRODUCTION_URL`

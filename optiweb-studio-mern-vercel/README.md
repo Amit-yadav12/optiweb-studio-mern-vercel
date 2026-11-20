@@ -42,9 +42,11 @@ how the server treats uploads: the server has no endpoint that accepts one.
   Content-Security-Policy whose `connect-src`, `form-action` and `default-src`
   are `'self'`. A script on the page cannot send data to another origin.
 - **A test watches the wire.** `npm run test:browser` drives the production
-  build in a real Chrome through a recording proxy, optimizes images, and
-  asserts that no request carried a body, a file name or image bytes. It also
-  repeats the work with the network cut off.
+  build in a real Chrome, with every request of the app passing through a
+  recording proxy. It optimizes images and asserts that no request carried a
+  body, a file name or image bytes, and that none went to another host. It
+  repeats the work with the network cut off. At the end it checks itself: a
+  page that does post to another host is recorded, body included.
 
 You can check it yourself: open the browser's developer tools on the Network
 tab and optimize an image.
@@ -121,7 +123,7 @@ npm test -- unit api     # only the named suites
 | api | `npm run test:api` | The HTTP contract: what is answered, what is refused, no cookies, no upload |
 | security | `npm run test:security` | Source, dependencies, headers and the build: nothing that could send, receive or keep a file |
 | function | `npm run test:function` | The Netlify function adapter |
-| a11y | `npm run test:a11y` | Every page rendered: headings, landmarks, names, labels; colour contrast of the tokens |
+| a11y | `npm run test:a11y` | Every page rendered: headings, tab titles, landmarks, names, labels; colour contrast of the tokens |
 | browser | `npm run test:browser` | The production build in a real Chrome: files never leave the tab; real outputs, sizes, rotation, limits, cancel |
 
 The browser suite needs Chrome or Chromium. It looks for `CHROME_PATH`, then an
@@ -129,8 +131,28 @@ installed browser, then the `@sparticuz/chromium` package
 (`npm install --no-save @sparticuz/chromium` brings its own). Set
 `UNIKIT_TEST_DEVICE="cores=4,memory=8"` to run it as a device of that size.
 
+CI runs it in Chrome's headless shell: the same engine as Chrome, published by
+the Chrome team for testing, without the browser around it. To use it too:
+
+```bash
+npx @puppeteer/browsers install chrome-headless-shell@stable   # prints the path
+CHROME_PATH=<that path> npm run test:browser
+```
+
+The reason is what the suite asserts. A full Google Chrome calls Google's
+services on its own account, whatever page is open. The suite keeps those calls
+apart from the app's: the app runs in a browser context with its own proxy,
+and three services that work inside every context (autofill lookups, a
+connection kept open to the search engine, an "AI Mode" availability check) are
+switched off. With that, the suite passes in a full Chrome as well. Should a
+later Chrome add another such service, the run fails and prints what Chrome's
+own network log says about the request; the headless shell has no such
+services and is not affected.
+
 `npm run smoke -- <url>` checks a running site through public requests:
-see [docs/deployment.md](docs/deployment.md).
+see [docs/deployment.md](docs/deployment.md). CI runs it against the started
+server, against the deploy previews of a pull request, and against production
+on `main`.
 
 ## Deployment
 
