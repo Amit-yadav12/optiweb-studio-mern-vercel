@@ -20,11 +20,31 @@
  * a list of "hosts the browser may call" would excuse the app as well. The
  * browser keeps the two apart by itself: a browser context has its own network
  * stack, and a proxy set on the context applies to that context only.
+ *
+ * A headless shell (the engine without the browser around it) has no services
+ * of its own, and its record at the second proxy stays empty.
  */
 import { once } from "node:events";
 import http from "node:http";
 
-/** Switches that turn off the browser's own network services, as far as it documents any. */
+/**
+ * Three services of a full Google Chrome work inside every browsing context,
+ * private ones included, so their calls would arrive in the app's record. Each
+ * was identified from the log Chrome keeps of its own network activity (see
+ * browser-netlog.mjs) and from Chromium's source, and each is switched off by
+ * the feature that guards it. None is caused by a page: the first two carry no
+ * initiating origin, the third is a connection with no request on it.
+ */
+const SERVICES_INSIDE_A_CONTEXT = [
+  // Asks content-autofill.googleapis.com about the fields of every form on a page.
+  "AutofillServerCommunication",
+  // Asks www.google.com/async/folae, once per profile, whether "AI Mode" is available.
+  "AimEnabled",
+  // Keeps a connection to the default search engine open, and retries every 50 ms when refused.
+  "PreconnectToSearch",
+];
+
+/** Switches that turn off the browser's own network services. */
 const QUIET = [
   "--disable-background-networking",
   "--disable-component-update",
@@ -33,10 +53,7 @@ const QUIET = [
   "--disable-domain-reliability",
   "--no-first-run",
   "--no-pings",
-  // Chrome asks a Google server about the fields of every form it sees, from
-  // the network stack of the page that holds the form. It is the one service of
-  // the browser that would show up in the app's record, so it is turned off.
-  "--disable-features=AutofillServerCommunication,CertificateTransparencyComponentUpdater",
+  `--disable-features=${["CertificateTransparencyComponentUpdater", ...SERVICES_INSIDE_A_CONTEXT].join(",")}`,
 ];
 
 function blankEntry(fields) {

@@ -966,12 +966,13 @@ try {
   const ownSent = sent(own);
   check("no page of the app ran outside the recorded browser context", own.every((entry) => entry.host !== appHost), own.filter((entry) => entry.host === appHost).map((entry) => `${entry.method} ${entry.path}`).join(", "));
   check("nothing the browser sent on its own carries a file's name or contents", !ownSent.includes(canary) && !ownSent.includes(canaryBytes.subarray(2000, 2048)) && !ownSent.includes(canaryBytes.subarray(2000, 2048).toString("base64")) && !ownSent.includes(secret), [...new Set(own.map((entry) => entry.host))].join(", "));
+  const ran = `${launched.version} (${launched.source})`;
   if (own.length === 0) {
-    note(`${sessionSummary}. The browser made no request of its own.`);
+    note(`${ran}: ${sessionSummary}. The browser made no request of its own.`);
   } else {
     const ownHosts = [...new Set(own.map((entry) => entry.host.replace(/:\d+$/, "")))].sort();
     const ownBody = own.reduce((sum, entry) => sum + entry.bodyBytes, 0);
-    note(`${sessionSummary}. Apart from the app, the browser itself tried ${own.length} requests to ${ownHosts.join(", ")} (${ownBody} bytes of body); the test proxy refused them all. They are the browser's own calls and happen with any page open.`);
+    note(`${ran}: ${sessionSummary}. Apart from the app, the browser itself tried ${own.length} requests to ${ownHosts.join(", ")} (${ownBody} bytes of body); the test proxy refused them all. They are the browser's own calls and happen with any page open.`);
   }
 } catch (error) {
   checker.crashed(error);
