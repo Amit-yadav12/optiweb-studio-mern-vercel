@@ -44,6 +44,11 @@ export function createChecker(title) {
       }
       return Boolean(condition);
     },
+    /** A fact worth reading that is neither a pass nor a failure. In GitHub Actions it becomes a notice. */
+    note(message) {
+      console.log(`  · ${message}`);
+      annotate("notice", message);
+    },
     /** Reports a crash as a failed run instead of an unexplained exit. */
     crashed(error) {
       const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);

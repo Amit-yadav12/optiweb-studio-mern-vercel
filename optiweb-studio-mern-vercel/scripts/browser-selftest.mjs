@@ -3,10 +3,10 @@
  *
  *   npm run build && npm run test:browser
  *
- * Starts the production build behind the real server, drives it in a real
- * Chromium, and records every byte the browser sends through a proxy that the
- * browser is forced to use. It proves, with a real decoder, real encoders and a
- * real network stack:
+ * Starts the production build behind the real server and drives it in a real
+ * Chrome or Chromium. The app runs in a browser context of its own, and every
+ * byte that context sends passes through a recording proxy. It proves, with a
+ * real decoder, real encoders and a real network stack:
  *
  *   P1  A selected file never leaves the tab.
  *   P2  Processing works with the network cut.
@@ -23,6 +23,11 @@
  *       Also: the policy that blocks other origins, the new name, settings,
  *       keyboard and drop, and the paths for browsers without workers or
  *       without a canvas that writes WebP.
+ *
+ * At the end it checks its own record: a page that does send something to
+ * another host is recorded, so the silence before it was not blindness. What
+ * the browser sends on its own account (a full Chrome calls Google's services
+ * whatever page is open) goes to a second proxy and is reported separately.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -38,7 +43,7 @@ import { readImageHeader } from "../src/shared/imageHeader.ts";
 import { resolveEngineLimits } from "../src/features/images/engine/plan.ts";
 
 const checker = createChecker("Real-browser self-test");
-const { check, section } = checker;
+const { check, section, note } = checker;
 const root = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -68,12 +73,16 @@ try {
   proxy = await startRecordingProxy({ origin: api.base });
   const launched = await launchBrowser({ args: proxy.browserArgs });
   browser = launched.browser;
+  // Every page of the app is opened in this context. Its traffic, and only its
+  // traffic, goes through the app's proxy.
+  const context = await browser.createBrowserContext(proxy.contextOptions);
+  const appHost = new URL(api.base).host;
   console.log(`Browser: ${launched.version} (${launched.source})`);
-  console.log(`App:     ${api.base} (production build, real server), all traffic through a recording proxy`);
+  console.log(`App:     ${api.base} (production build, real server), in a browser context whose traffic all passes through a recording proxy`);
 
   /* ------------------------------ downloads ------------------------------ */
   const cdp = await browser.target().createCDPSession();
-  await cdp.send("Browser.setDownloadBehavior", { behavior: "allowAndName", downloadPath: downloads, eventsEnabled: true });
+  await cdp.send("Browser.setDownloadBehavior", { behavior: "allowAndName", browserContextId: context.id, downloadPath: downloads, eventsEnabled: true });
   const begun = new Map();
   let waiter = null;
   cdp.on("Browser.downloadWillBegin", (event) => begun.set(event.guid, event));
@@ -171,7 +180,7 @@ try {
 
   const consoleErrors = [];
   async function openPage(path, { before } = {}) {
-    const tab = await browser.newPage();
+    const tab = await context.newPage();
     await tab.setViewport({ width: 1366, height: 900 });
     await tab.evaluateOnNewDocument(instrument);
     if (Object.keys(pretend).length > 0) await tab.evaluateOnNewDocument(pretendDevice, pretend);
@@ -775,7 +784,7 @@ try {
   check("fetch to another origin is blocked by the Content-Security-Policy", /Failed to fetch|violates|Refused/i.test(blocked.fetch), blocked.fetch);
   check("an image request to another origin is blocked too", blocked.image === "blocked", blocked.image);
   check("none of those attempts reached the network: the proxy saw no request to any other host in the whole session", outside.length === 0, outside.map((entry) => `${entry.method} ${entry.url}`).join(", "));
-  check("every request of the whole session went to the app's own origin", proxy.log.every((entry) => entry.host === new URL(api.base).host), [...new Set(proxy.log.map((entry) => entry.host))].join(", "));
+  check("every request of the whole session went to the app's own origin", proxy.log.every((entry) => entry.host === appHost), [...new Set(proxy.log.map((entry) => entry.host))].join(", "));
 
   section("P12f · The new name is everywhere and the old one is nowhere");
   const texts = {};
@@ -829,7 +838,15 @@ try {
   await tab.goto(`${api.base}/app/images`, { waitUntil: "networkidle0" });
   const zone = await tab.$('[role="button"][aria-disabled]');
   await zone.focus();
-  const [chooser] = await Promise.all([tab.waitForFileChooser({ timeout: 10_000 }), tab.keyboard.press("Enter")]);
+  // The request to report file choosers and the key press reach the page over
+  // different channels. The round trip in between makes sure the first has
+  // arrived before the second is sent; without it the key can win the race and
+  // the chooser opens unreported.
+  const chooserOpens = tab.waitForFileChooser({ timeout: 10_000 });
+  chooserOpens.catch(() => undefined);
+  await tab.evaluate(() => undefined);
+  await tab.keyboard.press("Enter");
+  const chooser = await chooserOpens;
   await chooser.accept([fixturePath("lossy-400x300.webp")]);
   await waitChecked(tab);
   check("Enter on the focused dropzone opens the file chooser, and the chosen file is queued", (await queue(tab)).some((entry) => entry.name === "lossy-400x300.webp" && entry.status === "ready"));
@@ -914,7 +931,43 @@ try {
   const uploads = proxy.log.filter((entry) => /multipart|octet-stream|image\//i.test(entry.contentType ?? ""));
   check(`request bodies in the whole session: ${totalSent} bytes, all of them the audit's JSON`, totalSent === auditRequest.body.length && totalSent < 100);
   check("no request declared a file-like content type", uploads.length === 0, uploads.map((entry) => entry.contentType).join(", "));
-  console.log(`\n  ${proxy.log.length} requests recorded, ${proxy.log.filter((entry) => entry.method === "GET").length} of them GET; ${totalSent} bytes of request body in total.`);
+  const sessionSummary = `${proxy.log.length} requests by the app, ${proxy.log.filter((entry) => entry.method === "GET").length} of them GET; ${totalSent} bytes of request body in total`;
+
+  /* ======================================================================= */
+  section("The record itself: it would have shown a request to another host");
+  // A blank page in the same browser context carries no Content-Security-Policy.
+  // What it sends to another host must appear in the record. If it did not, the
+  // silence recorded above would prove nothing.
+  const controlMark = proxy.mark();
+  const controlHost = `control-${randomBytes(6).toString("hex")}.invalid`;
+  const blank = await context.newPage();
+  await blank.evaluate(async (host) => {
+    await fetch(`http://${host}/upload`, { method: "POST", body: "the-bytes-of-a-file" }).catch(() => undefined);
+    await fetch(`https://${host}/`).catch(() => undefined);
+  }, controlHost);
+  await sleep(300);
+  const control = proxy.since(controlMark);
+  await blank.close();
+  const controlPost = control.find((entry) => entry.method === "POST" && entry.host === controlHost);
+  check("a page in the same browser context that posts to another host is recorded, with its body", controlPost?.body.toString("utf8") === "the-bytes-of-a-file" && controlPost?.refused === "other-origin", control.map((entry) => `${entry.method} ${entry.url}`).join(", "));
+  check("so is its attempt to open an encrypted connection", control.some((entry) => entry.method === "CONNECT" && entry.host === `${controlHost}:443`), control.map((entry) => `${entry.method} ${entry.url}`).join(", "));
+  check("the proxy refused both, so nothing left this machine", control.length > 0 && control.every((entry) => entry.refused === "other-origin"), control.map((entry) => `${entry.method} ${entry.url} ${entry.refused}`).join(", "));
+
+  section("What the browser sent on its own account, apart from the app");
+  // A full Google Chrome calls Google's services whatever page is open. Those
+  // calls come from outside the app's browser context and arrive at the second
+  // proxy, which refuses them all.
+  const own = proxy.browserLog;
+  const ownSent = sent(own);
+  check("no page of the app ran outside the recorded browser context", own.every((entry) => entry.host !== appHost), own.filter((entry) => entry.host === appHost).map((entry) => `${entry.method} ${entry.path}`).join(", "));
+  check("nothing the browser sent on its own carries a file's name or contents", !ownSent.includes(canary) && !ownSent.includes(canaryBytes.subarray(2000, 2048)) && !ownSent.includes(canaryBytes.subarray(2000, 2048).toString("base64")) && !ownSent.includes(secret), [...new Set(own.map((entry) => entry.host))].join(", "));
+  if (own.length === 0) {
+    note(`${sessionSummary}. The browser made no request of its own.`);
+  } else {
+    const ownHosts = [...new Set(own.map((entry) => entry.host.replace(/:\d+$/, "")))].sort();
+    const ownBody = own.reduce((sum, entry) => sum + entry.bodyBytes, 0);
+    note(`${sessionSummary}. Apart from the app, the browser itself tried ${own.length} requests to ${ownHosts.join(", ")} (${ownBody} bytes of body); the test proxy refused them all. They are the browser's own calls and happen with any page open.`);
+  }
 } catch (error) {
   checker.crashed(error);
   process.exitCode = 1;

@@ -11,6 +11,10 @@
  * The tests need a real browser because what they prove (decoding, canvas
  * encoding, WebAssembly codecs, Web Workers, and the absence of network
  * requests) does not exist in a simulated DOM.
+ *
+ * The browser is started as a visitor's browser is: with its security checks
+ * on. The only switch that relaxes anything is `--no-sandbox`, which concerns
+ * the browser's own processes and not what a page may do.
  */
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -49,7 +53,11 @@ async function bundledChromium() {
       process.env.AWS_EXECUTION_ENV ??= "AWS_Lambda_nodejs22.x";
       process.env.AWS_LAMBDA_JS_RUNTIME ??= "nodejs22.x";
       const chromium = (await import(pathToFileURL(resolved).href)).default;
-      return { executablePath: await chromium.executablePath(), args: chromium.args, source: "@sparticuz/chromium" };
+      // The package's own list of switches (`chromium.args`) is not used. It is
+      // written for AWS Lambda and turns off the same-origin policy, exposes
+      // SharedArrayBuffer to every page and runs everything in one process. A
+      // test run under those switches would not describe a visitor's browser.
+      return { executablePath: await chromium.executablePath(), source: "@sparticuz/chromium" };
     } catch {
       /* not installed there */
     }
@@ -62,10 +70,10 @@ export async function findBrowser() {
   const configured = process.env.CHROME_PATH ?? process.env.PUPPETEER_EXECUTABLE_PATH;
   if (configured) {
     if (!existsSync(configured)) throw new Error(`CHROME_PATH points to ${configured}, which does not exist.`);
-    return { executablePath: configured, args: [], source: "CHROME_PATH" };
+    return { executablePath: configured, source: "CHROME_PATH" };
   }
   const system = SYSTEM_CANDIDATES.find((candidate) => existsSync(candidate)) ?? onPath(["google-chrome-stable", "google-chrome", "chromium", "chromium-browser"]);
-  if (system) return { executablePath: system, args: [], source: "system" };
+  if (system) return { executablePath: system, source: "system" };
   return bundledChromium();
 }
 
@@ -83,10 +91,11 @@ export async function launchBrowser(options = {}) {
   const { default: puppeteer } = await import("puppeteer-core");
   const browser = await puppeteer.launch({
     executablePath: found.executablePath,
+    // The packaged build is a headless shell; an installed Chrome runs as the full browser, without a window.
     headless: found.source === "@sparticuz/chromium" ? "shell" : true,
     // The pages under test are this project's own, served from localhost. The
     // sandbox is off because CI containers and some Linux kernels do not allow it.
-    args: [...found.args, "--no-sandbox", "--disable-dev-shm-usage", ...(options.args ?? [])],
+    args: ["--no-sandbox", "--disable-dev-shm-usage", ...(options.args ?? [])],
     protocolTimeout: options.protocolTimeout ?? 180_000,
   });
   return { browser, source: found.source, executablePath: found.executablePath, version: await browser.version() };
