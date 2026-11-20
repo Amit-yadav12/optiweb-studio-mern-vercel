@@ -144,6 +144,8 @@ export async function startRecordingProxy({ origin }) {
   return {
     log,
     browserLog,
+    /** The two addresses, for telling the proxies apart in the browser's own log. */
+    addresses: { app: address(appProxy).replace("http://", ""), browser: address(browserProxy).replace("http://", "") },
     /** Switches for starting the browser: its own traffic goes to the browser's proxy. */
     browserArgs: [`--proxy-server=${address(browserProxy)}`, `--proxy-bypass-list=${NO_BYPASS}`, ...QUIET],
     /** Options for `browser.createBrowserContext()`: the context in which the app runs sends everything through the app's proxy. */

@@ -36,6 +36,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
 import { launchBrowser } from "./lib/browser.mjs";
+import { explainHosts } from "./lib/browser-netlog.mjs";
 import { startRecordingProxy } from "./lib/recording-proxy.mjs";
 import { animatedPng, createChecker, fixture, fixturePath, pngDeclaring, solidBmp, startApi } from "./lib/selftest-kit.mjs";
 import { formatBytes } from "../src/lib/format.ts";
@@ -67,16 +68,20 @@ const input = (name, bytes) => {
 let api;
 let proxy;
 let browser;
+/** The browser's log of its own network activity, read only when the app's record needs explaining. */
+const netlog = join(work, "netlog.json");
+let appHost = null;
+let controlHost = null;
 
 try {
   api = await startApi();
   proxy = await startRecordingProxy({ origin: api.base });
-  const launched = await launchBrowser({ args: proxy.browserArgs });
+  const launched = await launchBrowser({ args: [...proxy.browserArgs, `--log-net-log=${netlog}`] });
   browser = launched.browser;
   // Every page of the app is opened in this context. Its traffic, and only its
   // traffic, goes through the app's proxy.
   const context = await browser.createBrowserContext(proxy.contextOptions);
-  const appHost = new URL(api.base).host;
+  appHost = new URL(api.base).host;
   console.log(`Browser: ${launched.version} (${launched.source})`);
   console.log(`App:     ${api.base} (production build, real server), in a browser context whose traffic all passes through a recording proxy`);
 
@@ -939,7 +944,7 @@ try {
   // What it sends to another host must appear in the record. If it did not, the
   // silence recorded above would prove nothing.
   const controlMark = proxy.mark();
-  const controlHost = `control-${randomBytes(6).toString("hex")}.invalid`;
+  controlHost = `control-${randomBytes(6).toString("hex")}.invalid`;
   const blank = await context.newPage();
   await blank.evaluate(async (host) => {
     await fetch(`http://${host}/upload`, { method: "POST", body: "the-bytes-of-a-file" }).catch(() => undefined);
@@ -972,7 +977,18 @@ try {
   checker.crashed(error);
   process.exitCode = 1;
 } finally {
+  // A request to another host in the app's record fails the run. The proxy
+  // cannot say who inside the browser made it; the browser's own log can.
+  const strangers = [...new Set((proxy?.log ?? []).map((entry) => entry.host.replace(/:\d+$/, "")).filter((host) => host !== appHost?.replace(/:\d+$/, "") && host !== controlHost))];
+  if (strangers.length > 0 && browser) {
+    const targets = await browser.target().createCDPSession().then((session) => session.send("Target.getTargets")).catch(() => ({ targetInfos: [] }));
+    note(`The app's record holds requests to ${strangers.join(", ")}. Open in the browser at the end: ${targets.targetInfos.map((target) => `${target.type} ${target.url.slice(0, 80)}`).join("; ")}`);
+  }
   await browser?.close().catch(() => undefined);
+  if (strangers.length > 0) {
+    const readable = (line) => line.replaceAll(proxy.addresses.app, "the app's proxy").replaceAll(proxy.addresses.browser, "the browser's proxy");
+    for (const line of await explainHosts(netlog, strangers).catch((error) => [`the browser's network log could not be read: ${error.message}`])) note(`The browser's own log about ${strangers.join(", ")}: ${readable(line)}`);
+  }
   await proxy?.close().catch(() => undefined);
   await api?.close().catch(() => undefined);
   rmSync(work, { recursive: true, force: true });
