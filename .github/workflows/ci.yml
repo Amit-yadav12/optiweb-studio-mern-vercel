@@ -44,9 +44,9 @@ jobs:
     timeout-minutes: 25
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: optiweb-studio-mern-vercel/.nvmrc
           cache: npm
@@ -163,9 +163,9 @@ jobs:
       CHECK_URLS: ${{ github.event.inputs.url || (github.ref == 'refs/heads/main' && (vars.PRODUCTION_URL || 'https://optiweb-studio-mern-vercel.vercel.app')) || '' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: optiweb-studio-mern-vercel/.nvmrc
           cache: npm
