@@ -3,16 +3,19 @@ name: CI
 # Builds the app and runs every automated check. Nothing here needs a
 # database, a storage account or a secret: the app has none of them.
 #
-# The browser test drives the production build in the Chrome that GitHub's
-# runners carry. It is the check that a selected file never leaves the tab.
+# The browser test drives the production build in Chrome's headless shell. It
+# is the check that a selected file never leaves the tab.
 #
 # Once the build succeeds, every test step runs even if an earlier one failed,
 # so a single run reports all failures.
 #
-# On `main`, a second job then checks the production site itself: that it
-# serves the build of this commit, with the API of this version beside it.
-# Start the workflow by hand with an address to check any other deployed site,
-# for example a deploy preview of a pull request.
+# A second job then checks the app where it is deployed: that the site serves
+# the build of this commit, with the API of this version beside it.
+#   - On `main` it checks production.
+#   - On any other branch it checks the deploy previews that the hosts built
+#     for the commit, so a pull request is checked on the hosts before it is
+#     merged.
+#   - Started by hand with an address, it checks that address.
 
 on:
   push:
@@ -142,17 +145,22 @@ jobs:
 
   deployed:
     name: Deployed site serves this build
-    # Production is deployed from `main` by the hosting provider, in parallel
-    # with this workflow, so this job waits for it. Run the workflow by hand
-    # on `main` to check production again at any time, or with an address to
-    # check another site against the build of the chosen branch.
-    if: ${{ github.ref == 'refs/heads/main' || github.event.inputs.url }}
+    # The hosting providers deploy in parallel with this workflow, so this job
+    # waits for them. Run the workflow by hand on `main` to check production
+    # again at any time, or with an address to check another site against the
+    # build of the chosen branch.
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
+      # To read which deploy previews the hosts reported on the commit.
+      statuses: read
     env:
-      # Set the repository variable PRODUCTION_URL to check another address.
-      CHECK_URLS: ${{ github.event.inputs.url || vars.PRODUCTION_URL || 'https://optiweb-studio-mern-vercel.vercel.app' }}
+      # The addresses to check: the one given by hand, else production on
+      # `main` (set the repository variable PRODUCTION_URL to change it). Empty
+      # on any other branch, where the deploy previews of the commit are used.
+      CHECK_URLS: ${{ github.event.inputs.url || (github.ref == 'refs/heads/main' && (vars.PRODUCTION_URL || 'https://optiweb-studio-mern-vercel.vercel.app')) || '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -172,10 +180,19 @@ jobs:
       # Waits up to ten minutes for the deployment of this commit. Sends one
       # small generated image to confirm that uploads are refused, and asks
       # the site to audit its own home page. Changes nothing on the site.
+      #
+      # A preview that failed to build fails this step. A preview behind a
+      # sign-in is reported and left out. A commit without previews passes
+      # with a notice that no deployed copy of it was checked.
       - name: Check the deployed site
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -f
           STATUS=0
+          if [ -z "$CHECK_URLS" ]; then
+            CHECK_URLS="$(node scripts/deploy-previews.mjs "$GITHUB_REPOSITORY" "$GITHUB_SHA" --wait 600)" || STATUS=1
+          fi
           for url in $CHECK_URLS; do
             node scripts/deployed-smoke.mjs "$url" --expect-build --wait 600 || STATUS=1
           done
