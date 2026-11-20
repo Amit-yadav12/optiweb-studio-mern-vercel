@@ -67,7 +67,7 @@ export function WebsiteAudit() {
       push({
         tone: "ok",
         title: `Audited ${new URL(data.fetchedUrl).hostname}`,
-        description: `${data.totals.requestsOk} resources · ${formatBytes(data.totals.transferredBytes)} transferred · ${data.durationMs} ms`,
+        description: `${data.totals.requestsOk} resource${data.totals.requestsOk === 1 ? "" : "s"} · ${formatBytes(data.totals.transferredBytes)} transferred · ${data.durationMs} ms`,
       });
     } catch (error) {
       const message = error instanceof ApiClientError ? error.message : "The audit could not be completed.";

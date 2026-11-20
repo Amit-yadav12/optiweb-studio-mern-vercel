@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight, FileCode2, Globe, ImageDown, ScanSearch, ShieldCheck } from "lucide-react";
 import { WorkspaceShell } from "@/components/layout/WorkspaceShell";
@@ -159,6 +159,11 @@ export function OverviewPage() {
 }
 
 export function NotFoundPage() {
+  // Without this the tab would keep the title of the page the visitor came from.
+  useEffect(() => {
+    document.title = "Page not found · Unikit Studio";
+  }, []);
+
   return (
     <main id="main" className="grid min-h-screen place-items-center bg-canvas px-4">
       <Panel className="w-full max-w-lg text-center">

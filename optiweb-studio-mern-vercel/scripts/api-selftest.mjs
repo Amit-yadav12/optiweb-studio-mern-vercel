@@ -153,7 +153,7 @@ section("website audit: input is validated, and private addresses are refused be
   check("a page count outside 0–2 and a URL that is not a string are refused", pages.status === 422 && typed.status === 422 && pages.json.error.details.some((detail) => detail.path === "extraPages"));
   const array = await call("/api/v1/audits", { ip, ...json("[1,2,3]") });
   const scalar = await call("/api/v1/audits", { ip, ...json('"https://example.com"') });
-  check("a JSON array or a bare string is refused", array.status === 422 && [400, 422].includes(scalar.status), `${array.status} ${scalar.status}`);
+  check("a JSON array is a 422 and a bare string a 400: neither is read as a request", array.status === 422 && errorCode(array) === "validation_error" && scalar.status === 400 && errorCode(scalar) === "bad_request", `${array.status} ${scalar.status}`);
 }
 {
   // A server on this machine that records every connection. If the audit ever reached it, the guard would have failed.

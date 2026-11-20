@@ -198,6 +198,8 @@ const PAGES = [
 ];
 section(`every page, rendered (${PAGES.length} routes)`);
 const titles = new Set();
+/** What the browser tab shows for each route. */
+const tabTitles = new Map();
 let previous = null;
 let previousText = "";
 for (const [route, heading] of PAGES) {
@@ -213,10 +215,13 @@ for (const [route, heading] of PAGES) {
   const h1 = visibleText(previous);
   previousText = h1;
   titles.add(h1);
+  tabTitles.set(route, document.title);
   const found = ready ? problems() : ["the page did not render"];
   check(`${route} — "${h1}"`, found.length === 0 && (heading === null || h1 === heading), [heading !== null && h1 !== heading ? `the heading should be "${heading}"` : null, ...found].filter(Boolean).slice(0, 8).join("; "));
 }
 check("each page has its own main heading", titles.size === PAGES.length, [...titles].join(" | "));
+// A page reached from another page must not keep that page's title in the tab.
+check("each page has its own title in the browser tab, with the product's name in it", new Set(tabTitles.values()).size === PAGES.length && [...tabTitles.values()].every((title) => title.includes("Unikit Studio")), [...tabTitles].map(([route, title]) => `${route}: ${title}`).join(" | "));
 {
   window.history.pushState({}, "", "/app/images");
   window.dispatchEvent(new window.PopStateEvent("popstate"));

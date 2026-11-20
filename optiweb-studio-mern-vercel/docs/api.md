@@ -108,7 +108,8 @@ unavailable. The report is returned and not kept.
 | `Content-Type` is not `application/json` (a form or a file upload, for example) | `415 unsupported_media_type` |
 | Body larger than 16 KB | `413 payload_too_large` |
 | Body is not valid JSON | `400 bad_request` |
-| Body is not an object, or a field is missing or out of range | `422 validation_error`, with `details[].path` (a bare JSON string is refused with `400`) |
+| Body is a JSON array, or an object with a field missing or out of range | `422 validation_error`, with `details[].path` |
+| Body is a bare JSON value: a string, a number, `true`, `false` or `null` | `400 bad_request` |
 | The URL is not `http(s)`, carries credentials, names a private address, or its host does not resolve | `400 bad_request` |
 | The host cannot be reached, answers too slowly, or sends more than the size limit | `422 unprocessable_entity` |
 | More than 10 audits a minute from one address | `429 rate_limited`, with `Retry-After` |
