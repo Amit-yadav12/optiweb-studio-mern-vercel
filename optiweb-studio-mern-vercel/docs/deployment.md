@@ -40,6 +40,8 @@ fallback to `index.html`, and the same headers. If a build setting in the
 Netlify UI overrides the file, remove the override.
 
 The function is bundled with esbuild; `express` is kept as an external module.
+Netlify gives a function that answers a request 60 seconds, and that cannot be
+configured. An audit stops itself after 45 seconds.
 
 ## Any Node host
 
@@ -84,6 +86,7 @@ names are still read.
 ```bash
 npm run build                              # so the script knows this build
 npm run smoke -- https://your-site.example --expect-build --wait 600
+npm run smoke -- https://your-site.example --audit https://github.com/   # see below
 ```
 
 The smoke test uses public requests only and changes nothing on the site. It
@@ -103,21 +106,31 @@ checks that:
 - the audit refuses a loopback address and the cloud metadata address, and, on
   a public site, can audit the site's own home page.
 
+The files of the site's own home page are all on one host. Most pages keep
+theirs on others. `--audit <page>` asks the site to audit a page of your
+choice and reports how many of that page's resources on other hosts the audit
+could read. It is an observation and never fails the test: the page is someone
+else's, and it may be slow, down, or refuse the request.
+
 CI runs the same script on every push:
 
 - against the server started on the runner;
-- on a pull request branch, against the **deploy previews** that the hosts
-  built for the commit, so a change is checked on the hosts before it is
-  merged;
+- on a pull request branch, against the **deploy previews** that Netlify
+  built for the commit, so a change is checked on a host before it is merged;
 - on `main`, against production.
 
-The previews are found from the statuses that the host reports on the commit
+On the deployed copies CI passes `--audit` with the repository's page on
+GitHub, and the result is in the job's notices.
+
+The previews are found from the statuses that Netlify reports on the commit
 (`scripts/deploy-previews.mjs`). A preview that failed to build fails the job.
-A preview that asks for a sign-in cannot be checked from outside; it is named
-in a notice and left out. Vercel's previews are of that kind, as are those of a
-Netlify site with protected previews. A commit pushed before its pull request
-was opened has no previews: the job passes with a notice that no deployed copy
-was checked, and the next push is checked.
+A preview that asks for a sign-in cannot be checked from outside: the job names
+it in a notice and leaves it out. Vercel's previews are not looked for at all:
+this project's ask for a sign-in (Vercel's deployment protection), and the
+status Vercel reports on a commit carries the address of its dashboard, not of
+the preview. Whether they built is shown on the pull request. A commit pushed
+before its pull request was opened has no previews: the job passes with a
+notice that no deployed copy was checked, and the next push is checked.
 
 To check any other address, start the workflow by hand and give it:
 

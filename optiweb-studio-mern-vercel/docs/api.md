@@ -144,8 +144,11 @@ URL and again for every redirect and every resource:
 | Time kept for PageSpeed Insights | 10 s | `UNIKIT_AUDIT_PAGESPEED_TIMEOUT_MS` (12,000) |
 
 A limit that cuts an audit short is named in `coverage.stoppedBy`. A value
-above its ceiling is ignored. Keep the whole-audit time below the host's
-function limit (60 seconds as configured for Vercel).
+above its ceiling is ignored. Keep the whole-audit time below the host's limit
+for one function call, or the host ends the call and the visitor gets the
+host's error instead of a report. That limit is 60 seconds on Vercel (set in
+`vercel.json`) and 60 seconds on Netlify (fixed by Netlify for a function that
+answers a request).
 
 The rate limit is counted in the memory of one server instance. On a
 serverless host each instance counts separately, so it slows a single client

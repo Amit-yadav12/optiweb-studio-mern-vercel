@@ -181,6 +181,10 @@ jobs:
       # small generated image to confirm that uploads are refused, and asks
       # the site to audit its own home page. Changes nothing on the site.
       #
+      # `--audit` adds an observation that cannot fail the step: the site
+      # audits this repository's page on GitHub, whose files are on other
+      # hosts, and the step's notices say how many of them it could read.
+      #
       # A preview that failed to build fails this step. A preview behind a
       # sign-in is reported and left out. A commit without previews passes
       # with a notice that no deployed copy of it was checked.
@@ -194,6 +198,6 @@ jobs:
             CHECK_URLS="$(node scripts/deploy-previews.mjs "$GITHUB_REPOSITORY" "$GITHUB_SHA" --wait 600)" || STATUS=1
           fi
           for url in $CHECK_URLS; do
-            node scripts/deployed-smoke.mjs "$url" --expect-build --wait 600 || STATUS=1
+            node scripts/deployed-smoke.mjs "$url" --expect-build --wait 600 --audit "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" || STATUS=1
           done
           exit "$STATUS"

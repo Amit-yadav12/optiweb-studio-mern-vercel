@@ -4,7 +4,7 @@
  * nothing but Node, so it can be pointed at production, a preview or a local
  * server.
  *
- *   node scripts/deployed-smoke.mjs <base-url> [--expect-build] [--wait <seconds>]
+ *   node scripts/deployed-smoke.mjs <base-url> [--expect-build] [--wait <seconds>] [--audit <page-url>]
  *
  * It answers the questions a broken deployment raises:
  *
@@ -24,8 +24,15 @@
  *  - Does the one server-side tool, the website audit, refuse private
  *    addresses, and (on a public address) can it read a page?
  *
+ * With `--audit <page-url>` it also asks the site to audit that page, and
+ * reports how many of the page's resources on other hosts the audit could
+ * read. The site's own home page cannot show that: its files are all on one
+ * host. This is an observation and never a failure: the page belongs to someone
+ * else, and a test of this site must not fail because another site is slow,
+ * down, or refuses the request.
+ *
  * It sends one small generated image to prove that uploads are refused, and
- * asks for at most three audits. It changes nothing on the site.
+ * asks for at most four audits. It changes nothing on the site.
  */
 import fs from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -33,13 +40,16 @@ import { isIP } from "node:net";
 import { createChecker, solidPng } from "./lib/selftest-kit.mjs";
 
 const args = process.argv.slice(2);
-const base = (args.find((arg) => /^https?:\/\//.test(arg)) ?? "").replace(/\/+$/, "");
+/** The word after a flag, or null when the flag is absent or last. */
+const valueOf = (flag) => (args.includes(flag) ? (args[args.indexOf(flag) + 1] ?? null) : null);
+const isAddress = (value) => /^https?:\/\/[^/\s]+/.test(value ?? "");
+const auditPage = valueOf("--audit");
+const base = (args.find((arg, index) => isAddress(arg) && args[index - 1] !== "--audit") ?? "").replace(/\/+$/, "");
 const expectBuild = args.includes("--expect-build");
-const waitIndex = args.indexOf("--wait");
-const waitSeconds = waitIndex >= 0 ? Number(args[waitIndex + 1]) || 0 : 0;
+const waitSeconds = Number(valueOf("--wait")) || 0;
 
-if (!base) {
-  console.error("Usage: node scripts/deployed-smoke.mjs <base-url> [--expect-build] [--wait <seconds>]");
+if (!base || (args.includes("--audit") && !isAddress(auditPage))) {
+  console.error("Usage: node scripts/deployed-smoke.mjs <base-url> [--expect-build] [--wait <seconds>] [--audit <page-url>]");
   process.exit(2);
 }
 
@@ -211,6 +221,27 @@ section("the website audit");
     const report = own.json?.data;
     check("it audits a public page: this site's own home page", own.status === 200 && report?.document?.status === 200 && Array.isArray(report?.resources) && report.resources.length > 0 && report.coverage?.javascriptRendered === false, `${seen(own)}${own.json?.error?.message ? `: ${own.json.error.message}` : ""}`);
     if (report) note(`audit of ${base}/: ${report.resources.length} resources, ${kb(report.totals?.transferredBytes ?? 0)} read, ${report.durationMs} ms`);
+  }
+  if (auditPage) {
+    // An observation, not a check: see the note on --audit at the top.
+    const other = await audit(auditPage);
+    const found = other.json?.data;
+    if (other.status !== 200 || !Array.isArray(found?.resources)) {
+      note(`audit of ${auditPage}: the page was not read (${seen(other)}${other.json?.error?.message ? `: ${other.json.error.message}` : ""}), so nothing was learned about resources on other hosts`);
+    } else {
+      const hostOf = (address) => { try { return new URL(address).host; } catch { return ""; } };
+      const pageHost = hostOf(found.fetchedUrl ?? auditPage);
+      const resources = found.resources.filter((row) => row.kind !== "document");
+      const elsewhere = resources.filter((row) => hostOf(row.url) !== pageHost);
+      const read = elsewhere.filter((row) => row.skipped === undefined && typeof row.status === "number" && row.status < 400);
+      const hosts = [...new Set(elsewhere.map((row) => hostOf(row.url)))];
+      const reasons = [...new Set(elsewhere.filter((row) => !read.includes(row)).map((row) => row.skipped ?? `HTTP ${row.status}`))];
+      note(
+        `audit of ${auditPage}: the page and ${resources.length} resources, ${elsewhere.length} of them on ${hosts.length === 1 ? "another host" : `${hosts.length} other hosts`}` +
+          `${hosts.length > 0 ? ` (${hosts.join(", ")})` : ""}; ${read.length} of those ${elsewhere.length} were read${reasons.length > 0 ? ` (the rest: ${reasons.join("; ")})` : ""}; ` +
+          `${kb(found.totals?.transferredBytes ?? 0)} in ${found.durationMs} ms`,
+      );
+    }
   }
 }
 

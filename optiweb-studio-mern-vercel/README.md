@@ -151,8 +151,8 @@ services and is not affected.
 
 `npm run smoke -- <url>` checks a running site through public requests:
 see [docs/deployment.md](docs/deployment.md). CI runs it against the started
-server, against the deploy previews of a pull request, and against production
-on `main`.
+server, against the Netlify deploy previews of a pull request, and against
+production on `main`.
 
 ## Deployment
 
@@ -196,8 +196,9 @@ docs/                        API, deployment, design tokens
 ## Known limits
 
 - Encoding speed and the largest image depend on the visitor's device.
-- Chrome and Edge are the tested browsers (automated, Chromium). Firefox and
-  Safari use the same code paths, with the WebAssembly WebP encoder where their
-  canvas cannot write WebP; they are not covered by an automated test.
+- Chrome is the tested browser: Chrome's headless shell, Google Chrome and
+  Chromium, all automated. Edge has the same engine but was not run. Firefox
+  and Safari use the same code paths, with the WebAssembly WebP encoder where
+  their canvas cannot write WebP; no automated test runs in them.
 - The website audit reads HTML and the resources it names. It does not run the
   page's JavaScript.
