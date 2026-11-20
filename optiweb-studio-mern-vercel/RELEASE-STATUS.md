@@ -5,7 +5,7 @@ Pull request: #6.
 
 ## Verdict
 
-**The code is ready to merge. Two deployed previews of it pass every check.
+**The code is ready to merge. Two deployed previews of it pass the smoke test.
 Production has not run it yet.**
 
 Everything that can be checked from a build has been checked in real browsers,
@@ -101,25 +101,38 @@ JPEG are larger than the 670-byte original.
 
 ### On the hosts
 
-CI ran the smoke test against the deploy previews of the pull request
-(commit `6b9e55d`):
+CI runs the smoke test against the deploy previews of every commit pushed to
+the pull request. For commit `5a3964d`, the last one before this page was
+written:
 
 | Preview | Result |
 | --- | --- |
 | Netlify `rad-griffin-600eb2` | 31 of 31 |
 | Netlify `transcendent-biscuit-aa643c` | 31 of 31 |
-| Netlify `optiweb-studio-0` | not checked: its previews ask for a sign-in |
-| Vercel, both projects | not checked: their previews ask for a sign-in. Both built without error. |
+| Netlify `optiweb-studio-0` | built; not checked: its previews ask for a sign-in |
+| Vercel, both projects | built; not checked: their previews ask for a sign-in |
 
 Each of the two serves the app script of the commit and the API of this
 version, with the security policy in force. Each refused an upload at the old
 endpoint, at the audit endpoint and at a page address. Each audited its own
 home page: 8 resources, 347 KB, in under half a second.
 
-In the sandbox the audit could read a real page (`https://github.com/`,
-537 KB) but none of the 25 resources that page names, because the sandbox's
-network reaches only a few hosts. On the previews it read the page and its
-resources.
+**An audit across hosts.** A site's own home page keeps its files on one host.
+Most pages do not, so that audit leaves a question open: can the deployed
+function read a page's resources on other hosts? The sandbox cannot answer it.
+Its network reaches `github.com` and a few package hosts only. The audit read
+`https://github.com/` there (537 KB) and requested 25 of the resources it
+names, on `github.githubassets.com` and `images.ctfassets.net`. Every
+connection to those two hosts was cut before a response, as it is for any host
+outside the sandbox's short list; `curl` fails the same way.
+
+So the smoke test gained an option, `--audit <page>`, and CI passes it the
+repository's page on GitHub. On both previews the function read that page and
+all 25 resources it requested, every one of them on another host
+(`github.githubassets.com` and `avatars.githubusercontent.com`): 1,881 KB in
+about 1.5 seconds. This is reported as a notice and cannot fail a run, because
+the page belongs to someone else. A run in which the page is not read proves
+nothing either way.
 
 ## What the first run on GitHub uncovered
 
@@ -154,16 +167,33 @@ CI also gained a check: on a pull request branch it now runs the smoke test
 against the deploy previews of the commit. That is how the table above was
 made.
 
+## Faults found in the app, and fixed
+
+The new tests, and a look at every rendered page, found these:
+
+- **Order and load when a worker cannot start.** The page then does the work
+  itself. It started several files at once and finished them in reverse order.
+  It now takes one file at a time, in order.
+- **Text on the primary button in the dark theme** had a contrast of about
+  3:1. It is 6.25:1 now.
+- **Thirteen decorative icons** were exposed to assistive technology. They are
+  hidden from it now.
+- **The 404 page** had no `main` landmark, and it kept the title of the page
+  the visitor came from in the browser tab.
+- **The audit's confirmation** read "1 resources".
+
 ## Not verified
 
 - **Production.** The Vercel production address still serves a deployment of
   the first commit. See "To do on the hosts".
 - **The previews that ask for a sign-in**: Vercel's, and those of the Netlify
-  site `optiweb-studio-0`. The Vercel connector has no access to the team's
-  projects, so build logs and settings could not be read either.
-- **Firefox and Safari.** The automated browsers are Chrome and Chromium. The
-  paths those browsers need are tested by taking the feature away from
-  Chromium, not in those browsers.
+  site `optiweb-studio-0`. The hosts report that they built. What they serve
+  was not seen. The Vercel connector has no access to the team's projects, so
+  build logs and settings could not be read either.
+- **Firefox, Safari and Edge.** The automated browsers are Chrome and
+  Chromium. Edge has the same engine and was not run. The paths Firefox and
+  Safari need are tested by taking the feature away from Chromium, not in
+  those browsers.
 - **Phones and low-memory devices.** The limits for 2 GB and 4 GB devices are
   tested as arithmetic and by telling the page it runs on such a device, not on
   real hardware.
@@ -179,6 +209,8 @@ made.
 - The rate limit of the audit is counted per server instance, so on a
   serverless host it slows one client down but is not a hard quota.
 - The audit does not run a page's JavaScript.
+- CI reports the audit of a page with resources on other hosts as a notice.
+  If that stopped working, no run would fail; the notice would say so.
 - A commit pushed before its pull request is opened has no deploy previews,
   so CI has no deployed copy of it to check. The next push is checked.
 - The repository, the app directory and the hosting projects keep the name
@@ -189,14 +221,14 @@ made.
 
 1. **Vercel: promote the newest deployment of `main`.** Project → Deployments →
    newest `main` deployment → **Promote to Production** (or **Undo Rollback**).
-   The production address has served a deployment from the first commit since
-   2026-11-10 and ignores new ones until this is done. No change to the
-   repository can fix it.
+   The production address serves a deployment of the first commit and ignores
+   new ones until this is done. No change to the repository can fix it.
 2. **Delete the variables the app no longer reads**: `MONGODB_URI`,
    `BLOB_READ_WRITE_TOKEN`, `CRON_SECRET`, `CLIENT_ORIGIN`,
    `VITE_API_BASE_URL`, and the `OW_STORAGE_*` and `OW_REQUEST_*` settings.
 3. **Rotate the database password** that was shared earlier, at the provider.
-   The app no longer uses the database, but the credential still works.
+   The app no longer uses the database, but the password stays valid until it
+   is changed there.
 4. The CI run on `main` checks production with the smoke test, in its job
    "Deployed site serves this build". It fails until step 1 is done. Run it
    again afterwards: Actions → CI → Run workflow.
