@@ -206,6 +206,7 @@ const { SECURITY_HEADERS, CONTENT_SECURITY_POLICY } = await import("../src/serve
   const notInCi = suites.filter((name) => !workflow.includes(`run: npm run ${name}\n`));
   const notInRunner = suites.filter((name) => !runner.includes(`script: "${name}"`));
   check(`every test suite (${suites.length}) is run by CI and by \`npm test\``, suites.length === 10 && notInCi.length === 0 && notInRunner.length === 0, `not in CI: ${notInCi.join(", ") || "none"}; not in npm test: ${notInRunner.join(", ") || "none"}`);
+  check("CI runs the browser suite in Chrome's headless shell, which sends nothing of its own", /@puppeteer\/browsers install chrome-headless-shell@stable/.test(workflow) && /CHROME_PATH: \$\{\{ steps\.browser\.outputs\.path \}\}\n {8}run: npm run test:browser\n/.test(workflow));
   check("CI also runs the smoke test against the started server, and against the deployed site on main", /node scripts\/deployed-smoke\.mjs http:\/\/127\.0\.0\.1:5000 --expect-build/.test(workflow) && /node scripts\/deployed-smoke\.mjs "\$url" --expect-build --wait 600/.test(workflow));
 }
 

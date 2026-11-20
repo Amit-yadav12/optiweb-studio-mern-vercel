@@ -98,9 +98,23 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run test:a11y
 
-      # Fails, rather than skips, when the runner has no browser.
-      - name: Real browser (files never leave the tab; real outputs, sizes and limits)
+      # The browser test asserts what the browser sends. The Google Chrome on the
+      # runner also calls Google's services on its own account, and gains new ones
+      # with its updates. Chrome's headless shell is the same engine, published by
+      # the Chrome team for testing, without the browser around it: it sends
+      # nothing of its own, so the assertion needs no exceptions.
+      - name: Install the test browser (Chrome's headless shell)
+        id: browser
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          path="$(npx --no-install @puppeteer/browsers install chrome-headless-shell@stable --path "$RUNNER_TEMP/browsers" --format '{{path}}' | tail -n 1)"
+          test -x "$path"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Real browser (files never leave the tab; real outputs, sizes and limits)
+        if: ${{ !cancelled() && steps.browser.outcome == 'success' }}
+        env:
+          CHROME_PATH: ${{ steps.browser.outputs.path }}
         run: npm run test:browser
 
       # The check that the deployed-site job runs, here against the server

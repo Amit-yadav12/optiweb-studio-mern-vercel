@@ -95,7 +95,7 @@ try {
   // traffic, goes through the app's proxy.
   const context = await browser.createBrowserContext(proxy.contextOptions);
   appHost = new URL(api.base).host;
-  console.log(`Browser: ${launched.version} (${launched.source})`);
+  console.log(`Browser: ${launched.version} (${launched.kind}, ${launched.source})`);
   console.log(`App:     ${api.base} (production build, real server), in a browser context whose traffic all passes through a recording proxy`);
 
   /* ------------------------------ downloads ------------------------------ */
@@ -1000,7 +1000,7 @@ try {
   const ownSent = sent(own);
   check("no page of the app ran outside the recorded browser context", own.every((entry) => entry.host !== appHost), own.filter((entry) => entry.host === appHost).map((entry) => `${entry.method} ${entry.path}`).join(", "));
   check("nothing the browser sent on its own carries a file's name or contents", !ownSent.includes(canary) && !ownSent.includes(canaryBytes.subarray(2000, 2048)) && !ownSent.includes(canaryBytes.subarray(2000, 2048).toString("base64")) && !ownSent.includes(secret), [...new Set(own.map((entry) => entry.host))].join(", "));
-  const ran = `${launched.version} (${launched.source})`;
+  const ran = `${launched.version} (${launched.kind})`;
   if (own.length === 0) {
     note(`${ran}: ${sessionSummary}. The browser made no request of its own.`);
   } else {
