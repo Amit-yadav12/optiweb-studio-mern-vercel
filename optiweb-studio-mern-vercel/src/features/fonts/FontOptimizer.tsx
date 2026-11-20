@@ -1,139 +1,103 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ClipboardCopy, Download, FileCode2, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { Button, buttonClass } from "@/components/ui/Button";
-import { ErrorState, StatusBadge, useToast} from "@/components/ui/Feedback";
-import { StorageNotice } from "@/components/ui/StorageNotice";
+import { ErrorState, StatusBadge, useToast } from "@/components/ui/Feedback";
 import type { Tone } from "@/lib/status";
 import { Field, Select } from "@/components/ui/Form";
 import { DefinitionRow, Panel, PanelHeader, StatStrip } from "@/components/ui/Layout";
-import { ApiClientError, api, artifactUrl } from "@/lib/api-client";
-import { useServerLimits } from "@/lib/limits";
+import { saveBlob } from "@/lib/download";
 import { formatBytes, formatNumber } from "@/lib/format";
-import type { CssAnalysis, CssPatchResponse, CssFinding, FontDisplayPolicy } from "@/types/domain";
+import { recordActivity } from "@/lib/session-activity";
+import { CSS_DRAFT_STORAGE_KEY } from "@/lib/storage-keys";
+import { CssInputError, FONT_DISPLAY_VALUES, MAX_CSS_CHARS, POLICY_NOTES, analyzeCss, patchFontDisplay, type CssAnalysis, type CssFinding, type CssPatch, type FontDisplayPolicy } from "@/shared/css";
 import { SAMPLE_CSS } from "@/features/fonts/sampleCss";
 
-type PolicyInfo = { label: string; behaviour: string; tradeOff: string };
+const POLICIES = POLICY_NOTES;
 
-const POLICIES: Record<FontDisplayPolicy, PolicyInfo> = {
-  auto: {
-    label: "auto",
-    behaviour: "The browser applies its own default font-display behaviour.",
-    tradeOff: "Usually behaves like `block`: hidden text while the font downloads.",
-  },
-  block: {
-    label: "block",
-    behaviour: "Text stays invisible for up to ~3 seconds while the font loads.",
-    tradeOff: "No fallback flash, but invisible content is possible on slow connections.",
-  },
-  swap: {
-    label: "swap",
-    behaviour: "Fallback text renders immediately, then swaps when the real font arrives.",
-    tradeOff: "No invisible text; a visible re-layout can still occur.",
-  },
-  fallback: {
-    label: "fallback",
-    behaviour: "Very short block period (~100 ms) followed by a short swap window.",
-    tradeOff: "A balanced default for body text on most content sites.",
-  },
-  optional: {
-    label: "optional",
-    behaviour: "Short block period; the browser may keep the fallback for the entire visit.",
-    tradeOff: "Most stable layout, but the webfont may never render on slow networks.",
-  },
-};
+/** The draft survives a reload of this tab and is gone when the tab closes. A browser that blocks storage simply keeps no draft. */
+function readDraft(): string {
+  try {
+    return window.sessionStorage.getItem(CSS_DRAFT_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
 
+function writeDraft(value: string): void {
+  try {
+    if (value) window.sessionStorage.setItem(CSS_DRAFT_STORAGE_KEY, value);
+    else window.sessionStorage.removeItem(CSS_DRAFT_STORAGE_KEY);
+  } catch {
+    /* storage is blocked or full: the editor still works */
+  }
+}
+
+/**
+ * Analyses a stylesheet and adds `font-display` where it is missing.
+ *
+ * The stylesheet is parsed and patched by this page, with PostCSS running in
+ * the browser. It is not sent anywhere.
+ */
 export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPolicy }) {
   const { push } = useToast();
-  // The size limit is the server's. Until it is known, nothing is refused here; the server still enforces it.
-  const { limits: serverLimits, known: limitsKnown } = useServerLimits();
-  const maxCssChars = limitsKnown ? serverLimits.maxCssChars ?? null : null;
-  const [css, setCss] = useState("");
+  const [css, setCss] = useState(readDraft);
   const [policy, setPolicy] = useState<FontDisplayPolicy>(initialPolicy);
   const [analysis, setAnalysis] = useState<CssAnalysis | null>(null);
-  const [patched, setPatched] = useState<CssPatchResponse | null>(null);
-  const [busy, setBusy] = useState<"analyze" | "patch" | null>(null);
+  const [patched, setPatched] = useState<CssPatch | null>(null);
   const [failure, setFailure] = useState<{ message: string; hint?: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const outputRef = useRef<HTMLDivElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    return () => abortRef.current?.abort();
+  useEffect(() => () => {
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
   }, []);
-
-  useEffect(() => {
-    if (css) return;
-    // Restore the last analysed stylesheet if this session stored one.
-    const draft = window.sessionStorage.getItem("optiweb:css-draft");
-    if (draft) setCss(draft);
-  }, [css]);
 
   const updateCss = (value: string) => {
     setCss(value);
-    window.sessionStorage.setItem("optiweb:css-draft", value);
+    writeDraft(value);
   };
 
-  const analyze = async () => {
-    if (busy) return;
-    setBusy("analyze");
+  /** Runs a parser call and turns an input problem into a message. Returns null when the input was refused. */
+  const guarded = <T,>(work: () => T): T | null => {
     setFailure(null);
+    try {
+      return work();
+    } catch (error) {
+      setFailure(
+        error instanceof CssInputError
+          ? { message: error.message, hint: error.code === "too_large" ? "Analyse the part of the stylesheet that holds the @font-face rules." : undefined }
+          : { message: "The stylesheet could not be processed.", hint: "Your CSS is preserved in the editor." },
+      );
+      return null;
+    }
+  };
+
+  const analyze = () => {
     setPatched(null);
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    try {
-      const data = await api.post<CssAnalysis & { policies?: unknown }>("/api/v1/css/analyze", { css }, { signal: controller.signal });
-      setAnalysis(data);
-      push({
-        tone: data.parseErrors.length > 0 ? "danger" : data.missingFontDisplay > 0 ? "warn" : "ok",
-        title:
-          data.parseErrors.length > 0
-            ? "The stylesheet could not be parsed"
-            : `${data.fontFaceCount} @font-face rule${data.fontFaceCount === 1 ? "" : "s"} analysed`,
-        description:
-          data.parseErrors.length > 0
-            ? "Fix the reported line, then analyse again."
-            : `${data.missingFontDisplay} missing font-display · ${data.withFontDisplay} already declared`,
-      });
-    } catch (error) {
-      if (error instanceof ApiClientError && error.code === "cancelled") return;
-      const message = error instanceof Error ? error.message : "Analysis failed.";
-      setFailure({ message });
-    } finally {
-      setBusy(null);
-    }
+    const data = guarded(() => analyzeCss(css, policy));
+    if (!data) return;
+    setAnalysis(data);
+    recordActivity("fonts", { items: 1 });
+    push({
+      tone: data.parseErrors.length > 0 ? "danger" : data.missingFontDisplay > 0 ? "warn" : "ok",
+      title: data.parseErrors.length > 0 ? "The stylesheet could not be parsed" : `${data.fontFaceCount} @font-face rule${data.fontFaceCount === 1 ? "" : "s"} analysed`,
+      description: data.parseErrors.length > 0 ? "Fix the reported line, then analyse again." : `${data.missingFontDisplay} missing font-display · ${data.withFontDisplay} already declared`,
+    });
   };
 
-  const patch = async () => {
-    if (busy) return;
-    setBusy("patch");
-    setFailure(null);
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    try {
-      const data = await api.post<CssPatchResponse>("/api/v1/css/patch-font-display", { css, policy }, { signal: controller.signal });
-      setPatched(data);
-      setAnalysis(data.analysis);
-      push({
-        tone: data.rulesPatched.length > 0 ? "ok" : "neutral",
-        title:
-          data.rulesPatched.length > 0
-            ? `${data.rulesPatched.length} rule${data.rulesPatched.length === 1 ? "" : "s"} patched`
-            : "Nothing to patch",
-        description:
-          data.rulesPatched.length > 0
-            ? `font-display: ${policy} inserted · output ${formatBytes(data.outputBytes)}`
-            : "Every eligible rule already declares font-display.",
-      });
-      requestAnimationFrame(() => outputRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
-    } catch (error) {
-      if (error instanceof ApiClientError && error.code === "cancelled") return;
-      const message = error instanceof Error ? error.message : "The patch could not be generated.";
-      setFailure({ message, hint: "Your CSS is preserved in the editor." });
-    } finally {
-      setBusy(null);
-    }
+  const patch = () => {
+    const data = guarded(() => patchFontDisplay(css, policy));
+    if (!data) return;
+    setPatched(data);
+    setAnalysis(data.analysis);
+    recordActivity("fonts", { items: 1, inputBytes: data.inputBytes, outputBytes: data.outputBytes });
+    push({
+      tone: data.rulesPatched.length > 0 ? "ok" : "neutral",
+      title: data.rulesPatched.length > 0 ? `${data.rulesPatched.length} rule${data.rulesPatched.length === 1 ? "" : "s"} patched` : "Nothing to patch",
+      description: data.rulesPatched.length > 0 ? `font-display: ${policy} inserted · output ${formatBytes(data.outputBytes)}` : "Every eligible rule already declares font-display.",
+    });
+    requestAnimationFrame(() => outputRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }));
   };
 
   const copyOutput = async () => {
@@ -141,7 +105,8 @@ export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPol
     try {
       await navigator.clipboard.writeText(patched.output);
       setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
+      if (copiedTimer.current) clearTimeout(copiedTimer.current);
+      copiedTimer.current = setTimeout(() => setCopied(false), 1800);
     } catch {
       push({ tone: "warn", title: "Clipboard unavailable", description: "Select the text and copy it manually." });
     }
@@ -149,19 +114,7 @@ export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPol
 
   const downloadOutput = () => {
     if (!patched) return;
-    // The stored artifact is authoritative; fall back to a client-side blob when
-    // history storage is unavailable so the displayed output is never lost.
-    if (patched.artifactId) {
-      window.location.href = artifactUrl(patched.artifactId);
-      return;
-    }
-    const blob = new Blob([patched.output], { type: "text/css;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "styles.font-display.css";
-    anchor.click();
-    URL.revokeObjectURL(url);
+    saveBlob(new Blob([patched.output], { type: "text/css;charset=utf-8" }), "styles.font-display.css");
   };
 
   const outputLines = useMemo(() => (patched ? patched.output.split("\n") : []), [patched]);
@@ -181,11 +134,11 @@ export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPol
     <div className="flex flex-col gap-6">
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
         {/* -------------------------------------------------------- input */}
-        <Panel aria-labelledby="css-input">
+        <Panel labelledBy="css-input">
           <PanelHeader
             id="css-input"
             title="Stylesheet input"
-            description="Paste CSS or upload a .css file. Nothing is changed until you apply a policy."
+            description="Paste CSS or open a .css file. It is parsed by this page and is not sent anywhere."
             meta={analysis ? <StatusBadge tone={analysis.parseErrors.length ? "danger" : "neutral"}>{charCount.toLocaleString()} chars</StatusBadge> : null}
             actions={
               <div className="flex items-center gap-1.5">
@@ -193,7 +146,7 @@ export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPol
                   Load sample
                 </Button>
                 <label className={buttonClass({ variant: "secondary", size: "sm", className: "cursor-pointer" })}>
-                  Upload .css
+                  Open .css
                   <input
                     type="file"
                     accept=".css,text/css"
@@ -202,11 +155,16 @@ export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPol
                       const file = event.target.files?.[0];
                       event.target.value = "";
                       if (!file) return;
-                      if (maxCssChars !== null && file.size > maxCssChars) {
-                        push({ tone: "warn", title: "File too large", description: `Stylesheets are limited to ${maxCssChars.toLocaleString("en-US")} characters.` });
+                      // A character is at least one byte, so a file above the limit in bytes may still fit. The parser checks the exact length.
+                      if (file.size > MAX_CSS_CHARS * 4) {
+                        push({ tone: "warn", title: "File too large", description: `A stylesheet of up to ${(MAX_CSS_CHARS / 1_000_000).toFixed(0)} million characters can be analysed.` });
                         return;
                       }
-                      updateCss(await file.text());
+                      try {
+                        updateCss(await file.text());
+                      } catch {
+                        push({ tone: "danger", title: "The file could not be read", description: "Select it again." });
+                      }
                     }}
                   />
                 </label>
@@ -232,26 +190,28 @@ export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPol
             />
           </div>
 
-          <div className="mt-4 grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+          <div className="mt-4 flex flex-col gap-4">
             <Field
               label="font-display policy"
               htmlFor="policy"
               hint={POLICIES[policy].tradeOff}
             >
-              <Select id="policy" value={policy} onChange={(event) => setPolicy(event.target.value as FontDisplayPolicy)}>
-                {(Object.keys(POLICIES) as FontDisplayPolicy[]).map((value) => (
-                  <option key={value} value={value}>
-                    {POLICIES[value].label}
-                  </option>
-                ))}
-              </Select>
+              <div className="sm:max-w-56">
+                <Select id="policy" value={policy} onChange={(event) => setPolicy(event.target.value as FontDisplayPolicy)}>
+                  {FONT_DISPLAY_VALUES.map((value) => (
+                    <option key={value} value={value}>
+                      {POLICIES[value].label}
+                    </option>
+                  ))}
+                </Select>
+              </div>
             </Field>
             <div className="flex flex-wrap gap-2">
-              <Button variant="secondary" onClick={analyze} loading={busy === "analyze"} disabled={!css.trim()}>
+              <Button variant="secondary" onClick={analyze} disabled={!css.trim()}>
                 <FileCode2 className="size-3.5" aria-hidden />
                 Analyze
               </Button>
-              <Button variant="primary" onClick={patch} loading={busy === "patch"} disabled={!css.trim()}>
+              <Button variant="primary" onClick={patch} disabled={!css.trim()}>
                 Apply font-display
               </Button>
               <Button
@@ -277,14 +237,14 @@ export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPol
 
           {failure ? (
             <div className="mt-4">
-              <ErrorState title="Request failed" message={failure.message} hint={failure.hint} />
+              <ErrorState title="Not analysed" message={failure.message} hint={failure.hint} />
             </div>
           ) : null}
         </Panel>
 
         {/* ------------------------------------------------------ analysis */}
         <div className="flex flex-col gap-6">
-          <Panel aria-labelledby="analysis">
+          <Panel labelledBy="analysis">
             <PanelHeader
               id="analysis"
               title="Analysis"
@@ -336,7 +296,7 @@ export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPol
       {/* --------------------------------------------------- before / after */}
       {patched ? (
         <div ref={outputRef} className="animate-fade-up flex flex-col gap-4">
-          <Panel padded={false} aria-labelledby="diff">
+          <Panel padded={false} labelledBy="diff">
             <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-4 sm:px-5">
               <div>
                 <h2 id="diff" className="text-sm font-semibold text-ink">
@@ -390,16 +350,12 @@ export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPol
             </dl>
             <div className="px-4 py-3 sm:px-5">
               <p className="text-2xs leading-relaxed text-muted">
-                The download is the exact text shown in “Optimized CSS”. Adding
+                The download is the exact text shown in “Optimized CSS”, saved from this page. Adding
                 <span className="font-mono"> font-display</span> does not change how large your font files are —
                 it changes how long text is invisible while they load.
               </p>
             </div>
           </Panel>
-          <StorageNotice storage={patched.storage} persisted={patched.persisted} title="Patched, but not stored">
-            The patched CSS above is complete, and Download CSS saves it from this page. This run is not in History, so it
-            cannot be retrieved later.
-          </StorageNotice>
         </div>
       ) : (
         <Panel as="aside">
@@ -412,13 +368,14 @@ export function FontOptimizer({ initialPolicy }: { initialPolicy: FontDisplayPol
               <p className="mt-1.5 max-w-3xl text-xs leading-relaxed text-muted">
                 It inserts <span className="font-mono">font-display</span> into parsed
                 <span className="font-mono"> @font-face</span> rules that declare a
-                <span className="font-mono"> src</span>. Rules without a valid source are reported and left
-                untouched, existing declarations are only rewritten if you apply a different policy, and every
-                other rule in the stylesheet is preserved byte for byte.
+                <span className="font-mono"> src</span> and no <span className="font-mono">font-display</span>. Rules
+                without a source are reported and left untouched, a value that is already declared is never rewritten,
+                and every other rule in the stylesheet is preserved byte for byte. The parsing and the patch happen in
+                this browser: the stylesheet is not uploaded.
               </p>
               <dl className="mt-3 max-w-xl">
                 <DefinitionRow label="Default policy" value={`font-display: ${policy}`} />
-                <DefinitionRow label="Parser" value="postcss (spec-compliant, error-tolerant)" />
+                <DefinitionRow label="Parser" value="PostCSS, running in this browser" />
               </dl>
             </div>
           </div>
@@ -466,7 +423,7 @@ function CodePane({
                   key={`${index}-${line.slice(0, 8)}`}
                   className={`flex gap-3 border-l-2 ${marked ? `${toneClass} font-medium` : "border-l-transparent"}`}
                 >
-                  <span className="w-8 shrink-0 pr-1 text-right text-faint select-none">{index + 1}</span>
+                  <span className="w-8 shrink-0 pr-1 text-right text-muted select-none">{index + 1}</span>
                   <span className="min-w-0 flex-1 break-words whitespace-pre-wrap">{line || " "}</span>
                 </li>
               );

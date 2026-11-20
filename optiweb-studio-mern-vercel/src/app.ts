@@ -1,42 +1,42 @@
-import express, { type NextFunction, type Request as ExpressRequest, type Response as ExpressResponse } from "express";
+/**
+ * The Unikit Studio server.
+ *
+ * It serves the built app and one API endpoint, the website audit, which has
+ * to run on a server because a browser may not fetch another site's pages.
+ *
+ * What it deliberately does not have:
+ *  - no route that accepts a file (no multipart parser, no raw body parser);
+ *  - no database, no object storage, no background jobs;
+ *  - no cookies and no sessions.
+ * Images, stylesheets and asset files are processed in the visitor's browser
+ * and are never sent here.
+ */
+import express, { type NextFunction, type Request, type Response } from "express";
 import path from "node:path";
-import { Readable } from "node:stream";
-import type { ReadableStream as NodeWebStream } from "node:stream/web";
-import sharp from "sharp";
 import { randomUUID } from "node:crypto";
-import { APP_NAME } from "./server/config/env.js";
-import { probeMongo } from "./server/db/mongo.js";
-import { ApiError } from "./server/http/errors.js";
-import { STREAM_MARKER, jsonOk, route as routeWrapper, sessionFromCookieHeader } from "./server/http/handler.js";
-import { receiveLocalUpload } from "./server/pipeline/localUpload.js";
-import * as pipeline from "./server/routeHandlers/pipeline/routes.js";
-import { isValidRequestId, runWithRequestContext } from "./server/http/requestContext.js";
-import * as imageOptimize from "./server/routeHandlers/images/optimize/route.js";
-import * as imageBatch from "./server/routeHandlers/images/optimize/batch/route.js";
-import * as assetsAnalyze from "./server/routeHandlers/assets/analyze/route.js";
-import * as cssAnalyze from "./server/routeHandlers/css/analyze/route.js";
-import * as cssPatch from "./server/routeHandlers/css/patch-font-display/route.js";
-import * as audits from "./server/routeHandlers/audits/route.js";
-import * as history from "./server/routeHandlers/history/route.js";
-import * as historyDetail from "./server/routeHandlers/history/[id]/route.js";
-import * as artifact from "./server/routeHandlers/artifacts/[id]/route.js";
-import * as artifactZip from "./server/routeHandlers/artifacts/zip/route.js";
-import * as limitsRoute from "./server/routeHandlers/limits/route.js";
-import * as preferences from "./server/routeHandlers/preferences/route.js";
-import * as session from "./server/routeHandlers/session/route.js";
+import { ZodError } from "zod";
+import { APP_NAME, APP_VERSION, MAX_JSON_BODY_BYTES, limits } from "./server/config/env.js";
+import { SECURITY_HEADERS } from "./server/config/securityHeaders.js";
+import { ApiError, payloadTooLarge, rateLimited, unsupportedMedia, validationError } from "./server/http/errors.js";
+import { consumeRateLimit } from "./server/middleware/rateLimit.js";
+import { runWebsiteAudit } from "./server/services/auditService.js";
+import { auditRequestSchema } from "./server/validators/index.js";
 
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
 
-// Correlate a browser request with safe, minimal server diagnostics. Never log
-// request bodies, cookies, filenames, or environment values.
+const REQUEST_ID = /^[A-Za-z0-9._-]{8,80}$/;
+
+// One ID per request, returned in `X-Request-Id` and in `meta.requestId`.
+// Request bodies, URLs to audit and client addresses are never logged.
 app.use((req, res, next) => {
   const supplied = req.get("x-request-id");
-  const requestId = isValidRequestId(supplied) ? supplied : randomUUID();
+  const requestId = supplied && REQUEST_ID.test(supplied) ? supplied : randomUUID();
   const startedAt = Date.now();
   res.locals.requestId = requestId;
   res.setHeader("X-Request-Id", requestId);
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
   res.on("finish", () => {
     if (res.statusCode >= 500) {
       console.error(`[request] id=${requestId} method=${req.method} path=${req.path} status=${res.statusCode} durationMs=${Date.now() - startedAt}`);
@@ -45,253 +45,172 @@ app.use((req, res, next) => {
   next();
 });
 
-const allowedOrigins = (process.env.CLIENT_ORIGIN ?? "").split(",").map((item) => item.trim()).filter(Boolean);
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin && allowedOrigins.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-    res.setHeader("Vary", "Origin");
-  }
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-  res.setHeader("X-Frame-Options", "DENY");
-  if (req.method === "OPTIONS") {
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Requested-With");
-    res.status(204).end();
-    return;
-  }
-  next();
-});
+const requestIdOf = (res: Response): string => String(res.locals.requestId ?? randomUUID());
 
-// Upload target of the local storage driver (development and tests). It is
-// registered before the body parser on purpose: the file is streamed to disk
-// and never buffered. With any other driver the route answers 404, because
-// browsers then upload to the storage service, not to this server.
-app.put("/api/v1/uploads/:id/content", async (req, res) => {
-  const requestId = String(res.locals.requestId);
-  try {
-    const rawId = req.params.id;
-    const data = await receiveLocalUpload({
-      uploadId: Array.isArray(rawId) ? rawId[0] ?? "" : rawId,
-      sessionId: sessionFromCookieHeader(req.get("cookie")),
-      expires: Number(req.query.exp),
-      signature: typeof req.query.sig === "string" ? req.query.sig : "",
-      contentType: req.get("content-type") ?? "",
-      body: req,
-    });
-    res.status(200).json({ ok: true, data, meta: { requestId } });
-  } catch (error) {
-    req.resume();
-    const apiError = error instanceof ApiError ? error : new ApiError(500, "internal_error", "The request could not be completed.");
-    if (!(error instanceof ApiError)) console.error(`[api] request ${requestId} failed (${error instanceof Error ? error.name : "unknown error"})`);
-    res.status(apiError.status).json({ ok: false, error: { code: apiError.code, message: apiError.message, hint: apiError.hint }, meta: { requestId } });
-  }
-});
-
-// Netlify encodes binary function payloads as Base64 before invoking the
-// Function. Keep this raw-parser limit below its effective ~4.5 MB binary
-// request budget while preserving multipart boundaries for the Web Request API.
-// Large files never come this way: they are uploaded directly to object storage.
-app.use("/api", express.raw({ type: () => true, limit: "4.1mb" }));
-
-type WebHandler = (request: Request) => Promise<Response>;
-type DynamicWebHandler = (request: Request, segment: { params: Promise<{ id: string }> }) => Promise<Response>;
-
-function toWebRequest(req: ExpressRequest): Request {
-  const host = req.get("host") ?? "localhost";
-  const protocol = req.headers["x-forwarded-proto"]?.toString().split(",")[0] ?? req.protocol;
-  const url = new URL(req.originalUrl || req.url, `${protocol}://${host}`);
-  const headers = new Headers();
-  for (const [key, value] of Object.entries(req.headers)) {
-    if (Array.isArray(value)) headers.set(key, value.join(", "));
-    else if (typeof value === "string") headers.set(key, value);
-  }
-  const raw = Buffer.isBuffer(req.body) ? req.body : undefined;
-  if (raw && req.method !== "GET" && req.method !== "HEAD") {
-    return new Request(url, { method: req.method, headers, body: new Uint8Array(raw) });
-  }
-  return new Request(url, { method: req.method, headers });
+function sendOk(res: Response, data: unknown, extra?: Record<string, unknown>): void {
+  res.setHeader("Cache-Control", "no-store");
+  res.status(200).json({ ok: true, data, meta: { requestId: requestIdOf(res), ...extra } });
 }
 
-/**
- * Runs a handler with this request's ID readable by everything it calls. The
- * storage layer uses it to put the same ID in its log lines that the client
- * receives in `X-Request-Id` and `meta.requestId`. The context is entered here,
- * after body parsing, so it does not depend on how a parser schedules callbacks.
- */
-function inRequestContext<T>(res: ExpressResponse, run: () => T): T {
-  return runWithRequestContext({ requestId: String(res.locals.requestId) }, run);
-}
-
-function bridge(handler: WebHandler) {
-  return async (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
-    try {
-      const result = await inRequestContext(res, () => handler(toWebRequest(req)));
-      await sendWebResponse(result, res);
-    } catch (error) { next(error); }
-  };
-}
-
-function bridgeDynamic(handler: DynamicWebHandler) {
-  return async (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
-    try {
-      const rawId = req.params.id;
-      const result = await inRequestContext(res, () => handler(toWebRequest(req), { params: Promise.resolve({ id: Array.isArray(rawId) ? rawId[0] ?? "" : rawId }) }));
-      await sendWebResponse(result, res);
-    } catch (error) { next(error); }
-  };
-}
-
-async function sendWebResponse(response: Response, res: ExpressResponse): Promise<void> {
-  const streamed = response.headers.get(STREAM_MARKER) === "1" && response.body !== null;
-  response.headers.forEach((value, key) => {
-    if (key !== STREAM_MARKER) res.setHeader(key, value);
+function sendError(res: Response, error: ApiError): void {
+  res.setHeader("Cache-Control", "no-store");
+  if (error.code === "rate_limited") {
+    const retry = (error.details as { retryAfterSeconds?: number } | undefined)?.retryAfterSeconds;
+    if (retry) res.setHeader("Retry-After", String(retry));
+  }
+  res.status(error.status).json({
+    ok: false,
+    error: { code: error.code, message: error.message, hint: error.hint, details: error.details },
+    meta: { requestId: requestIdOf(res) },
   });
-  res.status(response.status);
-  if (response.status === 204 || response.status === 304) { res.end(); return; }
-  if (streamed) {
-    // Large downloads are piped, chunk by chunk, from storage to the client.
-    // If the source fails part-way the connection is closed, so the client
-    // sees an incomplete download instead of a file that looks complete.
-    const source = Readable.fromWeb(response.body as unknown as NodeWebStream<Uint8Array>);
-    source.on("error", () => res.destroy());
-    res.on("close", () => source.destroy());
-    source.pipe(res);
-    return;
-  }
-  const bytes = Buffer.from(await response.arrayBuffer());
-  res.send(bytes);
 }
 
-// Both health endpoints answer HTTP 200 whenever the API itself is running and
-// report database readiness in the body, because every tool except history and
-// downloads works without a database. `database` holds only booleans, a latency
-// and, when not ready, a failure category with fixed wording: never the
-// connection string, a host name or a driver message.
-//
-// `/api/health` is the liveness check: its `ok` is true when the API answers.
-app.get("/api/health", async (_req, res) => {
-  const database = await inRequestContext(res, () => probeMongo());
-  let sharpVersion: string | undefined;
-  try { sharpVersion = `${sharp.versions.sharp} (libvips ${sharp.versions.vips})`; } catch { /* optional runtime detail */ }
-  res.status(200).json({
+/** What this deployment is, for monitoring and for the interface. Nothing here depends on an external service. */
+function describeService() {
+  return {
     ok: true,
     service: APP_NAME,
-    version: process.env.npm_package_version ?? "1.0.0",
-    database,
-    sharp: { available: Boolean(sharpVersion), versions: sharpVersion },
+    version: APP_VERSION,
+    processing: { images: "browser", stylesheets: "browser", assets: "browser", audit: "server" },
+    acceptsFileUploads: false,
+    storesFiles: false,
+    usesCookies: false,
+    audit: {
+      maxPages: limits.auditMaxPages,
+      maxResourcesPerPage: limits.auditMaxResources,
+      pagespeedConfigured: Boolean(process.env.PAGESPEED_API_KEY),
+    },
     uptimeSeconds: Math.round(process.uptime()),
     timestamp: new Date().toISOString(),
-  });
+  };
+}
+
+// Liveness, without the envelope, for uptime monitors.
+app.get("/api/health", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.status(200).json(describeService());
 });
-// `/api/v1/health` is the readiness check: `data.ok` is true only when the
-// database accepted the connection, answered a ping, and accepted a read and
-// a write command on the job collection.
-app.get("/api/v1/health", bridge(routeWrapper(async (_request, ctx) => {
-  const database = await probeMongo();
-  let sharpVersion: string | undefined;
-  try { sharpVersion = `${sharp.versions.sharp} (libvips ${sharp.versions.vips})`; } catch { /* optional */ }
-  const body = { ok: database.ready, service: APP_NAME, version: process.env.npm_package_version ?? "1.1.0", database, sharp: { available: Boolean(sharpVersion), versions: sharpVersion }, uptimeSeconds: Math.round(process.uptime()), timestamp: new Date().toISOString() };
-  return jsonOk(body, ctx);
-})));
+app.get("/api/v1/health", (_req, res) => sendOk(res, describeService()));
 
-app.post("/api/v1/images/optimize", bridge(imageOptimize.POST));
-app.post("/api/v1/images/optimize/batch", bridge(imageBatch.POST));
-app.post("/api/v1/assets/analyze", bridge(assetsAnalyze.POST));
-app.post("/api/v1/css/analyze", bridge(cssAnalyze.POST));
-app.post("/api/v1/css/patch-font-display", bridge(cssPatch.POST));
-app.post("/api/v1/audits", bridge(audits.POST));
-app.get("/api/v1/history", bridge(history.GET));
-app.delete("/api/v1/history", bridge(history.DELETE));
-app.get("/api/v1/history/:id", bridgeDynamic(historyDetail.GET));
-app.delete("/api/v1/history/:id", bridgeDynamic(historyDetail.DELETE));
-// Registered before the `:id` routes, so that "zip" is not read as an artifact ID.
-app.get("/api/v1/artifacts/zip", bridge(artifactZip.GET));
-app.post("/api/v1/artifacts/zip", bridge(artifactZip.POST));
-app.get("/api/v1/artifacts/:id/status", bridgeDynamic(pipeline.artifactStatus));
-app.get("/api/v1/artifacts/:id", bridgeDynamic(artifact.GET));
-// Direct-upload pipeline: jobs, uploads, usage.
-app.post("/api/v1/jobs/image-optimization", bridge(pipeline.createJob));
-app.get("/api/v1/jobs/:id", bridgeDynamic(pipeline.getJob));
-app.post("/api/v1/jobs/:id/cancel", bridgeDynamic(pipeline.cancelJob));
-app.post("/api/v1/jobs/:id/retry", bridgeDynamic(pipeline.retryJob));
-app.post("/api/v1/uploads/token", bridge(pipeline.uploadToken));
-app.post("/api/v1/uploads/complete", bridge(pipeline.uploadComplete));
-app.delete("/api/v1/uploads/:id", bridgeDynamic(pipeline.uploadDelete));
-app.get("/api/v1/usage", bridge(pipeline.usage));
-// Operator endpoints, protected by a bearer secret. The scheduler calls the first one.
-app.get("/api/v1/internal/cron", bridge(pipeline.cron));
-app.post("/api/v1/internal/cron", bridge(pipeline.cron));
-app.get("/api/v1/internal/usage", bridge(pipeline.adminUsage));
-app.get("/api/v1/limits", bridge(limitsRoute.GET));
-app.get("/api/v1/preferences", bridge(preferences.GET));
-app.put("/api/v1/preferences", bridge(preferences.PUT));
-app.get("/api/v1/session", bridge(session.GET));
+/**
+ * POST /api/v1/audits: fetches a public page and the assets it names, and
+ * reports what was measured. The request body is a URL and a page count. The
+ * report goes back in the response and is not kept.
+ */
+app.post(
+  "/api/v1/audits",
+  (req, _res, next) => {
+    // Refuse before reading: this endpoint takes a small JSON document and nothing else.
+    if (!req.is("application/json")) {
+      next(unsupportedMedia("This endpoint accepts application/json only.", "Send { \"url\": \"https://…\" }. Files are not accepted by any endpoint."));
+      return;
+    }
+    next();
+  },
+  express.json({ limit: MAX_JSON_BODY_BYTES, type: "application/json", strict: true }),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const limit = consumeRateLimit("audits", req.ip ?? "unknown");
+      if (!limit.allowed) throw rateLimited("Too many audits. Wait a moment and try again.", limit.retryAfterSeconds);
+      const parsed = auditRequestSchema.safeParse(req.body);
+      if (!parsed.success) throw validationError("Request payload failed validation.", flattenZod(parsed.error));
+      const report = await runWebsiteAudit(parsed.data.url, { extraPages: parsed.data.extraPages });
+      sendOk(res, report, { rateLimit: { limit: limit.limit, remaining: limit.remaining } });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
-// Return a consistent 405 for known API paths used with the wrong method.
-// This is more actionable for clients than treating a method mismatch as a
-// missing route, while preserving 404 for genuinely unknown paths.
-const methodNotAllowed = (allow: string[]) => (_req: ExpressRequest, res: ExpressResponse) => {
+function flattenZod(error: ZodError): Array<{ path: string; message: string }> {
+  return error.issues.map((issue) => ({ path: issue.path.join(".") || "body", message: issue.message }));
+}
+
+const methodNotAllowed = (allow: string[]) => (_req: Request, res: Response) => {
   res.setHeader("Allow", allow.join(", "));
-  res.status(405).json({
-    ok: false,
-    error: { code: "method_not_allowed", message: `Method not allowed. Use ${allow.join(" or ")}.` },
-    meta: { requestId: randomUUID() },
-  });
+  sendError(res, new ApiError(405, "method_not_allowed", `Method not allowed. Use ${allow.join(" or ")}.`));
 };
-app.all("/api/v1/images/optimize", methodNotAllowed(["POST"]));
-app.all("/api/v1/images/optimize/batch", methodNotAllowed(["POST"]));
-app.all("/api/v1/assets/analyze", methodNotAllowed(["POST"]));
-app.all("/api/v1/css/analyze", methodNotAllowed(["POST"]));
-app.all("/api/v1/css/patch-font-display", methodNotAllowed(["POST"]));
+app.all("/api/health", methodNotAllowed(["GET"]));
+app.all("/api/v1/health", methodNotAllowed(["GET"]));
 app.all("/api/v1/audits", methodNotAllowed(["POST"]));
-app.all("/api/v1/history", methodNotAllowed(["GET", "DELETE"]));
-app.all("/api/v1/history/:id", methodNotAllowed(["GET", "DELETE"]));
-app.all("/api/v1/artifacts/zip", methodNotAllowed(["GET", "POST"]));
-app.all("/api/v1/artifacts/:id/status", methodNotAllowed(["GET"]));
-app.all("/api/v1/artifacts/:id", methodNotAllowed(["GET"]));
-app.all("/api/v1/jobs/image-optimization", methodNotAllowed(["POST"]));
-app.all("/api/v1/jobs/:id/cancel", methodNotAllowed(["POST"]));
-app.all("/api/v1/jobs/:id/retry", methodNotAllowed(["POST"]));
-app.all("/api/v1/jobs/:id", methodNotAllowed(["GET"]));
-app.all("/api/v1/uploads/token", methodNotAllowed(["POST"]));
-app.all("/api/v1/uploads/complete", methodNotAllowed(["POST"]));
-app.all("/api/v1/uploads/:id", methodNotAllowed(["DELETE"]));
-app.all("/api/v1/usage", methodNotAllowed(["GET"]));
-app.all("/api/v1/internal/cron", methodNotAllowed(["GET", "POST"]));
-app.all("/api/v1/internal/usage", methodNotAllowed(["GET"]));
-app.all("/api/v1/limits", methodNotAllowed(["GET"]));
-app.all("/api/v1/preferences", methodNotAllowed(["GET", "PUT"]));
-app.all("/api/v1/session", methodNotAllowed(["GET"]));
+
+/**
+ * Endpoints of earlier versions, which uploaded files to this server and kept
+ * results. They answer 410 Gone, without reading the request body, so that an
+ * old client gets a clear answer instead of a silent failure.
+ */
+const REMOVED = /^\/api\/v1\/(images|assets|css|jobs|uploads|artifacts|history|usage|preferences|session|limits|internal)(\/|$)/;
+app.use((req, res, next) => {
+  if (!REMOVED.test(req.path)) {
+    next();
+    return;
+  }
+  sendError(
+    res,
+    new ApiError(410, "gone", "This endpoint was removed.", {
+      hint: `${APP_NAME} processes images, stylesheets and asset files in the browser. The server accepts no files and stores nothing.`,
+    }),
+  );
+});
 
 app.use("/api", (_req, res) => {
-  res.status(404).json({ ok: false, error: { code: "not_found", message: "API route not found." }, meta: { requestId: randomUUID() } });
+  sendError(res, new ApiError(404, "not_found", "API route not found."));
 });
 
-const root = path.resolve(process.cwd());
-const dist = path.join(root, "dist");
-app.use(express.static(dist, { index: false, maxAge: process.env.NODE_ENV === "production" ? "1h" : 0 }));
+const dist = path.join(path.resolve(process.cwd()), "dist");
+app.use(
+  express.static(dist, {
+    index: false,
+    setHeaders: (res, filePath) => {
+      // Hashed build files never change; everything else is revalidated.
+      res.setHeader("Cache-Control", /[\\/]assets[\\/]/.test(filePath) ? "public, max-age=31536000, immutable" : "no-cache");
+    },
+  }),
+);
+// A build file that does not exist is a 404, not the app's page: a browser
+// that asks for a script must never be handed HTML.
+app.use("/assets", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.status(404).type("text/plain").send("Not found. This file is not part of the current build. Reload the page to get the current one.\n");
+});
 app.get(/.*/, (_req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
   res.sendFile(path.join(dist, "index.html"), (error) => {
-    if (error && !res.headersSent) res.status(404).send("Frontend build not found. Run npm run build first.");
+    if (error && !res.headersSent) res.status(404).type("text/plain").send("Frontend build not found. Run npm run build first.");
   });
 });
 
-app.use((error: unknown, _req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+// Pages are read with GET. No route here accepts a body, so any other method on a page path is refused.
+app.use((_req, res) => {
+  res.setHeader("Allow", "GET, HEAD");
+  sendError(res, new ApiError(405, "method_not_allowed", "Method not allowed. Pages are served with GET; no route accepts a file."));
+});
+
+app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
   // Express identifies an error middleware by its four-argument signature.
   void next;
+  if (res.headersSent) return;
+  if (error instanceof ApiError) {
+    sendError(res, error);
+    return;
+  }
   const maybe = error as { status?: number; statusCode?: number; type?: string };
-  const requestId = String(res.locals.requestId ?? randomUUID());
   if (maybe.type === "entity.too.large") {
-    res.status(413).json({ ok: false, error: { code: "payload_too_large", message: "Request exceeds the deployment-safe 4.1 MB body limit.", hint: "Use a smaller file or split the batch." }, meta: { requestId } });
+    sendError(res, payloadTooLarge(`The request body is larger than ${MAX_JSON_BODY_BYTES / 1024} KB.`, "An audit request holds a URL and a page count. Files are not accepted by any endpoint."));
+    return;
+  }
+  if (maybe.type === "entity.parse.failed") {
+    sendError(res, new ApiError(400, "bad_request", "Request body must be valid JSON."));
     return;
   }
   const status = Number(maybe.status ?? maybe.statusCode);
-  const safeStatus = status >= 400 && status < 500 ? status : 500;
-  if (safeStatus === 500) console.error(`[express] request ${requestId} failed (${error instanceof Error ? error.name : "unknown error"})`);
-  res.status(safeStatus).json({ ok: false, error: { code: safeStatus === 500 ? "internal_error" : "request_error", message: safeStatus === 500 ? "The request could not be completed." : "The request was rejected." }, meta: { requestId } });
+  if (status >= 400 && status < 500) {
+    sendError(res, new ApiError(status, "request_error", "The request could not be processed."));
+    return;
+  }
+  // Exception messages are not logged: they can contain the URL that was audited.
+  console.error(`[api] request ${requestIdOf(res)} failed (${error instanceof Error ? error.name : "unknown error"})`);
+  sendError(res, new ApiError(500, "internal_error", "The request could not be completed."));
 });
 
 export default app;

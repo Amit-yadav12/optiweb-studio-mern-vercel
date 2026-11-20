@@ -2,12 +2,11 @@ import { useState } from "react";
 import { Globe, Info } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { ErrorState, ProgressIndicator, StatusBadge, useToast } from "@/components/ui/Feedback";
-import { StorageNotice } from "@/components/ui/StorageNotice";
 import { Field, Input, SegmentedControl } from "@/components/ui/Form";
 import { Panel, PanelHeader, StatStrip, TableShell, Td, Th } from "@/components/ui/Layout";
 import { ApiClientError, api } from "@/lib/api-client";
 import { formatBytes } from "@/lib/format";
-import type { StorageOutcome } from "@/types/domain";
+import { recordActivity } from "@/lib/session-activity";
 
 type AuditResponse = {
   url: string;
@@ -46,9 +45,6 @@ type AuditResponse = {
   };
   findings: Array<{ id: string; severity: string; title: string; evidence: string; action: string; heuristic: boolean }>;
   pagespeed: { configured: boolean; lab: Record<string, { value: number | string | null; source: string; kind: string }> | null; field: Record<string, { value: number | string | null; source: string; kind: string }> | null; error?: string };
-  jobId: string;
-  persisted: boolean;
-  storage?: StorageOutcome;
 };
 
 export function WebsiteAudit() {
@@ -65,8 +61,9 @@ export function WebsiteAudit() {
     setBusy(true);
     setFailure(null);
     try {
-      const data = await api.post<AuditResponse>("/api/v1/audits", { url, extraPages: Number(pageCount) - 1 });
+      const data = await api.postJson<AuditResponse>("/api/v1/audits", { url, extraPages: Number(pageCount) - 1 });
       setReport(data);
+      recordActivity("audit", { items: data.pages?.length ?? 1, inputBytes: data.totals.transferredBytes });
       push({
         tone: "ok",
         title: `Audited ${new URL(data.fetchedUrl).hostname}`,
@@ -82,27 +79,32 @@ export function WebsiteAudit() {
 
   return (
     <div className="flex flex-col gap-6">
-      <Panel>
+      <Panel labelledBy="audit-input">
         <PanelHeader
+          id="audit-input"
           title="Public page URL"
-          description="Fetches the document over HTTPS, parses the HTML, and inspects discoverable images, stylesheets, fonts and scripts. This is not a headless Chrome session."
+          description="The server fetches the page, parses its HTML, and inspects the images, stylesheets, fonts and scripts it names. This is not a headless Chrome session."
         />
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
           <div className="flex-1">
-            <Field label="URL" htmlFor="audit-url" hint="http(s) only. Private, loopback and link-local hosts are rejected.">
+            <Field label="URL" htmlFor="audit-url">
               <Input
                 id="audit-url"
                 value={url}
                 onChange={(event) => setUrl(event.target.value)}
                 placeholder="https://example.com/"
                 inputMode="url"
+                aria-describedby="audit-url-hint"
               />
             </Field>
           </div>
-          <Button variant="primary" size="lg" onClick={run} loading={busy} leading={<Globe className="size-4" aria-hidden />}>
+          <Button variant="primary" onClick={run} loading={busy} leading={<Globe className="size-4" aria-hidden />}>
             {busy ? "Fetching…" : "Run audit"}
           </Button>
         </div>
+        <p id="audit-url-hint" className="mt-1.5 text-xs leading-relaxed text-muted">
+          http(s) only. Private, loopback and link-local hosts are rejected.
+        </p>
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <SegmentedControl
             label="Pages to inspect"
@@ -126,9 +128,13 @@ export function WebsiteAudit() {
         ) : null}
         {failure ? (
           <div className="mt-4">
-            <ErrorState title="Audit rejected" message={failure.message} hint={failure.hint} />
+            <ErrorState title="Audit not completed" message={failure.message} hint={failure.hint} />
           </div>
         ) : null}
+        <p className="mt-4 border-t border-line pt-3 text-xs leading-relaxed text-muted">
+          This is the one tool that uses the server, because a browser is not allowed to read another site's pages. What is sent is the URL you enter
+          and the page count. No file from your device is involved. The report comes back to this page and is not kept on the server.
+        </p>
       </Panel>
 
       {report ? (
@@ -141,10 +147,6 @@ export function WebsiteAudit() {
               { label: "Duration", value: `${report.durationMs} ms` },
             ]}
           />
-
-          <StorageNotice storage={report.storage} persisted={report.persisted} title="Audited, but not stored">
-            The report below is complete. This run is not in History, so it cannot be opened again later.
-          </StorageNotice>
 
           <Panel as="aside">
             <div className="flex gap-3.5">

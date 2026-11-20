@@ -1,29 +1,17 @@
-import {
-  ArrowRight,
-  Check,
-  FileCode2,
-  Gauge,
-  ImageDown,
-  Lock,
-  ScanSearch,
-  TriangleAlert,
-} from "lucide-react";
+import { useEffect } from "react";
+import { ArrowRight, Check, FileCode2, Gauge, Globe, ImageDown, MonitorSmartphone, ScanSearch, ServerOff, ShieldCheck } from "lucide-react";
 import { ButtonLink } from "@/components/ui/Button";
-import { ProductMark } from "@/components/brand/ProductMark";
+import { ProductMark, Wordmark } from "@/components/brand/ProductMark";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { FormatTag, Panel, TableShell, Td, Th } from "@/components/ui/Layout";
 import { StatusBadge } from "@/components/ui/Feedback";
 import { formatBytes, formatSavingsPercent } from "@/lib/format";
-import { mbLabel, useServerLimits } from "@/lib/limits";
 
-export const metadata = {
-  title: "OptiWeb Studio — Make every byte count",
-};
+export const LANDING_TITLE = "Unikit Studio — Image and web-asset tools that run in your browser";
 
 /**
- * Illustrative sample used in the product preview. It is measured output from a
- * representative JPEG at quality 78, clearly labelled as sample data — it is
- * not a benchmark claim and not live user data.
+ * Illustrative sample used in the product preview. It is clearly labelled as
+ * sample data: it is not a benchmark claim and not live user data.
  */
 const SAMPLE_ROWS = [
   { file: "hero-header.jpg", input: 842_112, output: 214_880, format: "webp" },
@@ -35,27 +23,50 @@ const SAMPLE_TOTAL_INPUT = SAMPLE_ROWS.reduce((sum, row) => sum + row.input, 0);
 const SAMPLE_TOTAL_OUTPUT = SAMPLE_ROWS.reduce((sum, row) => sum + row.output, 0);
 const SAMPLE_SAVED = SAMPLE_TOTAL_INPUT - SAMPLE_TOTAL_OUTPUT;
 
+const TOOLS = [
+  {
+    icon: ImageDown,
+    title: "Image Optimizer",
+    body: "Re-encode to WebP, AVIF, JPEG or PNG, cap dimensions, and compare before and after with exact byte counts.",
+    points: ["Runs in a Web Worker of your tab", "Per-file status, cancel at any time", "ZIP built on your device"],
+    href: "/app/images",
+  },
+  {
+    icon: FileCode2,
+    title: "Font Optimizer",
+    body: "Parse a stylesheet with PostCSS, find @font-face rules without font-display, and review a line-level diff before applying.",
+    points: ["Five policy options", "Malformed CSS reported, never patched", "Copy or download the output"],
+    href: "/app/fonts",
+  },
+  {
+    icon: ScanSearch,
+    title: "Asset Analyzer",
+    body: "Read format, dimensions, weight and metadata straight from file headers, then send a file to the optimizer.",
+    points: ["Evidence for every finding", "Flags GPS location in photos", "Heuristics labelled as such"],
+    href: "/app/assets",
+  },
+  {
+    icon: Globe,
+    title: "Website Audit",
+    body: "Inspect a public page and the images, stylesheets, fonts and scripts it names. The one tool that needs the server.",
+    points: ["Sends a URL, never a file", "Private addresses are refused", "Lab data labelled as lab data"],
+    href: "/app/audit",
+  },
+] as const;
+
 export default function LandingPage() {
-  // The numbers on this page are the server's. Until they arrive, "…" is shown instead of a guess.
-  const { limits: server, known } = useServerLimits();
-  const image = server.image;
-  const limits = {
-    files: known ? String(image?.maxFiles ?? server.maxFilesPerRequest) : "…",
-    fileMb: known ? mbLabel(image?.maxFileBytes ?? server.maxFileBytes) : "…",
-    cssChars: known && server.maxCssChars ? server.maxCssChars.toLocaleString("en-US") : null,
-    artifactDays: known ? String(Math.round((image?.artifactTtlHours ?? server.artifactTtlHours) / 24)) : "…",
-  };
+  useEffect(() => {
+    document.title = LANDING_TITLE;
+  }, []);
+
   return (
     <div className="min-h-screen bg-canvas">
       <header className="sticky top-0 z-40 border-b border-line bg-canvas/90 backdrop-blur-sm">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
-          <span className="flex items-center gap-2.5">
-            <ProductMark size={26} />
-            <span className="text-sm font-semibold tracking-[-0.01em] text-ink">OptiWeb Studio</span>
-          </span>
+          <Wordmark tagline={false} />
           <nav aria-label="Product" className="flex items-center gap-2">
             <ThemeToggle />
-            <ButtonLink href="/app" variant="ghost" size="sm" className="hidden sm:inline-flex">
+            <ButtonLink href="/app" variant="ghost" size="sm" className="max-sm:hidden">
               Workspace
             </ButtonLink>
             <ButtonLink href="/app/images" variant="primary" size="sm">
@@ -72,30 +83,30 @@ export default function LandingPage() {
             <div>
               <p className="flex items-center gap-2 font-mono text-2xs tracking-[0.16em] text-accent uppercase">
                 <span className="inline-block h-[5px] w-8 rule-ticks" aria-hidden />
-                Static asset performance toolkit
+                Web-asset toolkit · runs in your browser
               </p>
               <h1 className="mt-5 text-display font-semibold tracking-[-0.03em] text-ink">
-                Less weight.
+                Lighter assets.
                 <br />
-                Faster experiences.
+                Nothing uploaded.
               </h1>
               <p className="mt-5 max-w-xl text-lg leading-relaxed text-ink-soft">
-                Convert images, inspect font-loading rules, and measure asset savings in one focused
-                workspace — built for developers who ship production websites.
+                Convert images, check font-loading rules and inspect assets in one focused workspace. Your browser does the work, so your files
+                stay on your device.
               </p>
               <div className="mt-7 flex flex-wrap items-center gap-3">
                 <ButtonLink href="/app/images" variant="primary" size="lg" trailing={<ArrowRight className="size-4" aria-hidden />}>
                   Open the optimizer
                 </ButtonLink>
-                <ButtonLink href="#workflow" variant="secondary" size="lg">
-                  Explore the workflow
+                <ButtonLink href="#privacy" variant="secondary" size="lg">
+                  How your files are handled
                 </ButtonLink>
               </div>
               <dl className="mt-9 grid max-w-lg grid-cols-3 gap-4 border-t border-line pt-5">
                 {[
                   { term: "Formats", detail: "WebP · AVIF · JPEG · PNG" },
-                  { term: "Batch limit", detail: `${limits.files} files / batch` },
-                  { term: "CSS engine", detail: "PostCSS parse + patch" },
+                  { term: "Processing", detail: "on your device" },
+                  { term: "Account", detail: "none · no cookies" },
                 ].map((item) => (
                   <div key={item.term}>
                     <dt className="text-2xs font-medium tracking-[0.12em] text-muted uppercase">{item.term}</dt>
@@ -105,14 +116,14 @@ export default function LandingPage() {
               </dl>
             </div>
 
-            {/* Product preview — illustrative data, labelled as such */}
+            {/* Product preview: illustrative data, labelled as such */}
             <Panel className="relative overflow-hidden" padded={false}>
               <div className="grid-blueprint absolute inset-0 opacity-60" aria-hidden />
               <div className="relative">
                 <div className="flex items-center justify-between border-b border-line px-4 py-3">
                   <span className="flex items-center gap-2 text-xs font-medium text-ink">
                     <Gauge className="size-3.5 text-accent" aria-hidden />
-                    Image Optimizer — result summary
+                    Image Optimizer · result summary
                   </span>
                   <StatusBadge tone="neutral">Sample data</StatusBadge>
                 </div>
@@ -154,8 +165,8 @@ export default function LandingPage() {
                   </tbody>
                 </TableShell>
                 <p className="border-t border-line px-4 py-3 text-2xs leading-relaxed text-muted">
-                  Illustrative values for three sample assets, not live measurements. Every number the app
-                  reports comes from the buffers it actually produces.
+                  Illustrative values for three sample assets, not live measurements. Every number the app reports is the real size of a file your
+                  browser produced.
                 </p>
               </div>
             </Panel>
@@ -165,37 +176,10 @@ export default function LandingPage() {
         {/* -------------------------------------------------------- capabilities */}
         <section className="border-b border-line">
           <div className="mx-auto max-w-6xl px-4 py-14 sm:px-6">
-            <h2 className="text-2xl font-semibold tracking-[-0.02em] text-ink">Three tools, one workflow</h2>
-            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted">
-              Each tool reports only what it can prove from the file you hand it.
-            </p>
-            <div className="mt-8 grid gap-4 md:grid-cols-3">
-              {[
-                {
-                  icon: ImageDown,
-                  title: "Image Optimizer",
-                  body: "Re-encode to WebP or AVIF, cap dimensions, and compare before/after previews with exact byte accounting.",
-                  points: ["Real sharp pipeline", "Per-file status", "ZIP bundle export"],
-                  href: "/app/images",
-                  label: "Image Optimizer",
-                },
-                {
-                  icon: FileCode2,
-                  title: "Font Optimizer",
-                  body: "Parse stylesheets with PostCSS, find @font-face rules missing font-display, and review a line-level diff before applying.",
-                  points: ["Five policy options", "Malformed CSS reported", "Copy or download output"],
-                  href: "/app/fonts",
-                  label: "Font Optimizer",
-                },
-                {
-                  icon: ScanSearch,
-                  title: "Asset Analyzer",
-                  body: "Inspect uploaded images and stylesheets for size, dimensions and format warnings, then send a file straight to the optimizer.",
-                  points: ["Evidence per finding", "Thresholds from Settings", "Heuristics labelled"],
-                  href: "/app/assets",
-                  label: "Asset Analyzer",
-                },
-              ].map((card) => (
+            <h2 className="text-2xl font-semibold tracking-[-0.02em] text-ink">Four tools, one workspace</h2>
+            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted">Each tool reports only what it can show from the file or page you give it.</p>
+            <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              {TOOLS.map((card) => (
                 <Panel key={card.title} className="flex flex-col">
                   <span className="grid size-9 place-items-center rounded-md border border-line bg-surface-sunken text-accent">
                     <card.icon className="size-4" aria-hidden />
@@ -204,14 +188,14 @@ export default function LandingPage() {
                   <p className="mt-2 text-sm leading-relaxed text-muted">{card.body}</p>
                   <ul className="mt-4 flex flex-col gap-1.5">
                     {card.points.map((point) => (
-                      <li key={point} className="flex items-center gap-2 text-xs text-ink-soft">
-                        <Check className="size-3.5 shrink-0 text-ok" aria-hidden />
+                      <li key={point} className="flex items-start gap-2 text-xs text-ink-soft">
+                        <Check className="mt-0.5 size-3.5 shrink-0 text-ok" aria-hidden />
                         {point}
                       </li>
                     ))}
                   </ul>
                   <ButtonLink href={card.href} variant="secondary" size="sm" className="mt-5 self-start">
-                    Open {card.label}
+                    Open {card.title}
                   </ButtonLink>
                 </Panel>
               ))}
@@ -225,28 +209,26 @@ export default function LandingPage() {
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
                 <h2 className="text-2xl font-semibold tracking-[-0.02em] text-ink">How optimization works</h2>
-                <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted">
-                  Select, configure, review. The same three steps for every asset.
-                </p>
+                <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted">Select, configure, review. The same three steps for every image, all of them on your device.</p>
               </div>
-              <p className="font-mono text-2xs tracking-[0.14em] text-muted uppercase">select → configure → review</p>
+              <p className="font-mono text-2xs tracking-[0.14em] text-muted uppercase">select · configure · review</p>
             </div>
             <ol className="mt-9 grid gap-px overflow-hidden border border-line bg-line md:grid-cols-3">
               {[
                 {
                   step: "01",
                   title: "Select",
-                  body: `Drop up to ${limits.files} images or paste a stylesheet. Types are allowlisted and the real bytes are decoded before anything else happens.`,
+                  body: "Drop images onto the page. Each file is identified from its own bytes, and its header is read for dimensions before anything is decoded.",
                 },
                 {
                   step: "02",
                   title: "Configure",
-                  body: "Pick an output format, set quality between 30 and 100, and optionally cap width or height. Aspect ratio is always preserved.",
+                  body: "Pick an output format or let the tool compare several, set the quality, and optionally cap width or height. Proportions are always kept.",
                 },
                 {
                   step: "03",
                   title: "Review",
-                  body: "Compare previews, read the measured input/output sizes and savings, then download single files or a bundled ZIP.",
+                  body: "Compare previews and read the measured sizes. When a result is larger than its original, you are told, and the original is offered instead.",
                 },
               ].map((item) => (
                 <li key={item.step} className="bg-surface p-5">
@@ -256,87 +238,97 @@ export default function LandingPage() {
                 </li>
               ))}
             </ol>
-          </div>
-        </section>
-
-        {/* ------------------------------------------------ inputs & limitations */}
-        <section className="border-b border-line">
-          <div className="mx-auto grid max-w-6xl gap-8 px-4 py-14 sm:px-6 lg:grid-cols-2">
-            <div>
-              <h2 className="text-xl font-semibold tracking-[-0.02em] text-ink">Supported inputs</h2>
-              <div className="mt-4 flex flex-wrap gap-2">
-                {["JPEG", "PNG", "WebP", "AVIF", "GIF", "TIFF", ".css"].map((format) => (
-                  <FormatTag key={format}>{format}</FormatTag>
-                ))}
-              </div>
-              <ul className="mt-5 flex flex-col gap-2.5 text-sm text-ink-soft">
-                {[
-                  `Up to ${limits.fileMb} MB per file and ${limits.files} files per batch`,
-                  "Quality range 30–100; dimensions capped at 8000px",
-                  limits.cssChars ? `Stylesheets up to ${limits.cssChars} characters` : "Stylesheets up to the size the server allows",
-                  "SVG is analysed but not rasterised — it is already vector",
-                ].map((item) => (
-                  <li key={item} className="flex gap-2.5">
-                    <Check className="mt-0.5 size-3.5 shrink-0 text-ok" aria-hidden />
-                    {item}
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div>
-              <h2 className="text-xl font-semibold tracking-[-0.02em] text-ink">Honest limitations</h2>
-              <ul className="mt-4 flex flex-col gap-3 text-sm text-ink-soft">
-                {[
-                  "Savings are measured per file. They do not guarantee a better LCP, INP or CLS score — those depend on how the asset is used in the page.",
-                  "The analyzer sees the file you upload, not your page. It cannot know the rendered size or the number of visitors.",
-                  "Outputs larger than their source are reported as negative savings instead of being hidden.",
-                  "History is scoped to this browser session. Artifacts expire after the configured retention period (30 days by default).",
-                ].map((item) => (
-                  <li key={item} className="flex gap-2.5">
-                    <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-warn" aria-hidden />
-                    {item}
-                  </li>
-                ))}
-              </ul>
+            <div className="mt-8 flex flex-wrap items-center gap-2">
+              <span className="mr-1 text-xs text-muted">Reads</span>
+              {["JPEG", "PNG", "WebP", "AVIF", "GIF", "BMP", ".css"].map((format) => (
+                <FormatTag key={format}>{format}</FormatTag>
+              ))}
+              <span className="mx-1 text-xs text-muted">· writes</span>
+              {["WebP", "AVIF", "JPEG", "PNG"].map((format) => (
+                <FormatTag key={`out-${format}`}>{format}</FormatTag>
+              ))}
             </div>
           </div>
         </section>
 
         {/* ------------------------------------------------------------- privacy */}
-        <section className="border-b border-line bg-surface">
-          <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-12 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
+        <section id="privacy" className="border-b border-line">
+          <div className="mx-auto max-w-6xl px-4 py-14 sm:px-6">
             <div className="flex gap-4">
               <span className="grid size-10 shrink-0 place-items-center rounded-md border border-line bg-surface-sunken text-accent">
-                <Lock className="size-4" aria-hidden />
+                <ShieldCheck className="size-4" aria-hidden />
               </span>
               <div className="max-w-2xl">
-                <h2 className="text-lg font-semibold tracking-[-0.02em] text-ink">Processing and privacy</h2>
+                <h2 className="text-2xl font-semibold tracking-[-0.02em] text-ink">Private because of how it is built</h2>
                 <p className="mt-2 text-sm leading-relaxed text-muted">
-                  Uploads are decoded in memory on the server and never executed. Results and metadata are
-                  stored against an anonymous session cookie so you can revisit them during a working
-                  session; produced files are deleted after {limits.artifactDays} days. No accounts, no
-                  third-party trackers, no analytics beyond the session summary you can see yourself.
+                  The tools do not promise to delete your files after processing them. They never receive them. The work is done by your browser,
+                  and the server has nothing that could take a file.
                 </p>
               </div>
             </div>
-            <ButtonLink href="/app/settings" variant="secondary" size="md">
-              Review data retention
-            </ButtonLink>
+            <div className="mt-8 grid gap-4 lg:grid-cols-2">
+              <Panel>
+                <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
+                  <MonitorSmartphone className="size-4 text-accent" aria-hidden />
+                  On your device
+                </h3>
+                <ul className="mt-3 flex flex-col gap-2.5 text-sm text-ink-soft">
+                  {[
+                    "Images are decoded, resized and encoded by your browser, in a Web Worker of the tab.",
+                    "Stylesheets are parsed and patched in the page. Asset analysis reads file headers in the page.",
+                    "Results live in the tab's memory. Downloads and ZIP files are made there, without a request.",
+                    "Closing the tab or leaving the page discards everything. Nothing is written to disk except what you save.",
+                  ].map((item) => (
+                    <li key={item} className="flex gap-2.5">
+                      <Check className="mt-0.5 size-3.5 shrink-0 text-ok" aria-hidden />
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              </Panel>
+              <Panel>
+                <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
+                  <ServerOff className="size-4 text-accent" aria-hidden />
+                  On the server
+                </h3>
+                <ul className="mt-3 flex flex-col gap-2.5 text-sm text-ink-soft">
+                  {[
+                    "No endpoint accepts a file. There is no upload route to send one to.",
+                    "No database and no file storage: there is nowhere a result could be kept.",
+                    "No cookies, no accounts, no analytics and no third-party scripts.",
+                    "One job only: the Website Audit fetches the public URL you enter and returns a report, which is not kept.",
+                  ].map((item) => (
+                    <li key={item} className="flex gap-2.5">
+                      <Check className="mt-0.5 size-3.5 shrink-0 text-ok" aria-hidden />
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              </Panel>
+            </div>
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-4 border border-line bg-surface px-4 py-4 sm:px-5">
+              <p className="max-w-3xl text-sm leading-relaxed text-muted">
+                <span className="font-medium text-ink">You can check this yourself.</span> Open your browser's developer tools on the Network tab
+                and optimize an image: the only requests are for the app's own code, including the AVIF codec the first time it is needed. The
+                site's Content-Security-Policy also tells the browser to refuse any connection to another origin.
+              </p>
+              <ButtonLink href="/app/settings" variant="secondary" size="md">
+                What is kept in your browser
+              </ButtonLink>
+            </div>
           </div>
         </section>
 
         {/* ----------------------------------------------------------- final CTA */}
         <section>
           <div className="mx-auto max-w-6xl px-4 py-16 text-center sm:px-6">
-            <span className="mx-auto mb-6 flex w-fit items-center gap-2 font-mono text-2xs tracking-[0.16em] text-faint uppercase">
+            <span className="mx-auto mb-6 flex w-fit items-center gap-2 font-mono text-2xs tracking-[0.16em] text-muted uppercase">
               <span className="inline-block h-[5px] w-10 rule-ticks" aria-hidden />
               Ready when you are
               <span className="inline-block h-[5px] w-10 rule-ticks" aria-hidden />
             </span>
-            <h2 className="text-3xl font-semibold tracking-[-0.025em] text-ink">Make every byte count.</h2>
-            <p className="mx-auto mt-3 max-w-xl text-sm leading-relaxed text-muted">
-              Start with a single image or a stylesheet you already ship. No sign-up, no configuration.
-            </p>
+            <h2 className="text-3xl font-semibold tracking-[-0.025em] text-ink">Optimize here. Upload nothing.</h2>
+            <p className="mx-auto mt-3 max-w-xl text-sm leading-relaxed text-muted">Start with a single image or a stylesheet you already ship. No sign-up, no configuration.</p>
             <div className="mt-7 flex flex-wrap justify-center gap-3">
               <ButtonLink href="/app/images" variant="primary" size="lg" trailing={<ArrowRight className="size-4" aria-hidden />}>
                 Open the optimizer
@@ -353,9 +345,9 @@ export default function LandingPage() {
         <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-6 sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <span className="flex items-center gap-2.5">
             <ProductMark size={20} />
-            <span className="text-xs text-muted">OptiWeb Studio — static asset performance toolkit</span>
+            <span className="text-xs text-muted">Unikit Studio · web-asset tools that run in your browser</span>
           </span>
-          <p className="font-mono text-2xs text-faint">sharp · postcss · react · node</p>
+          <p className="font-mono text-2xs text-muted">canvas · webassembly · postcss · react</p>
         </div>
       </footer>
     </div>

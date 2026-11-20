@@ -1,56 +1,36 @@
 /**
- * Product mark: three bars compressed into the same column — the optimisation
- * idea in one glyph. Used in the sidebar, the landing hero and the footer.
+ * The Unikit Studio mark: a "U" whose right stem ends in a separate block.
+ * The block is one piece of the kit; the stem it sits on is the rest.
  *
- * The bars use `currentColor` and the accent token, so the mark adapts to the
- * active theme instead of carrying a fixed palette.
+ * The same drawing is used for the favicon and the app icons in `public/`.
  */
-export function ProductMark({
-  size = 28,
-  tone = "ink",
-}: {
-  size?: number;
-  tone?: "ink" | "inverse" | "accent";
-}) {
+export const BRAND_NAME = "Unikit Studio";
+export const BRAND_TAGLINE = "Runs in your browser";
+
+export function ProductMark({ size = 28, tone = "accent" }: { size?: number; tone?: "accent" | "inverse" }) {
+  // "accent": the brand colour with a white glyph. "inverse": a white tile with the glyph in the brand colour, for dark surfaces.
+  const tile = tone === "inverse" ? "#ffffff" : "var(--color-accent)";
+  const glyph = tone === "inverse" ? "var(--color-accent)" : "#ffffff";
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 28 28"
-      role="img"
-      aria-label="OptiWeb Studio"
-      className={tone === "inverse" ? "text-white" : tone === "accent" ? "text-accent" : "text-ink"}
-    >
-      <rect
-        x="0.75"
-        y="0.75"
-        width="26.5"
-        height="26.5"
-        fill="none"
-        stroke="currentColor"
-        strokeOpacity="0.22"
-        strokeWidth="1.5"
-      />
-      <rect x="7" y="6.5" width="14" height="3" fill="currentColor" />
-      <rect x="7" y="12.5" width="9.5" height="3" fill="currentColor" />
-      <rect x="7" y="18.5" width="5" height="3" fill="var(--color-accent)" />
+    <svg width={size} height={size} viewBox="0 0 32 32" role="img" aria-label={BRAND_NAME} className="shrink-0">
+      <rect width="32" height="32" rx="7" fill={tile} />
+      <path d="M9.5 8.2v8.3a6.5 6.5 0 0 0 13 0v-2.2" fill="none" stroke={glyph} strokeWidth="3.4" strokeLinecap="round" />
+      <rect x="20.2" y="6.5" width="4.6" height="4.6" rx="1.1" fill={glyph} />
     </svg>
   );
 }
 
-export function Wordmark({ tone = "ink", compact = false }: { tone?: "ink" | "inverse"; compact?: boolean }) {
+/** The mark with the name set next to it. The name is real text, so it is read by screen readers and can be selected. */
+export function Wordmark({ tone = "ink", tagline = true }: { tone?: "ink" | "inverse"; tagline?: boolean }) {
+  const inverse = tone === "inverse";
   return (
-    <span className={`flex items-center gap-2.5 ${compact ? "" : ""}`}>
-      <ProductMark size={26} tone={tone === "inverse" ? "inverse" : "ink"} />
+    <span className="flex items-center gap-2.5">
+      <ProductMark size={26} tone={inverse ? "inverse" : "accent"} />
       <span className="flex flex-col leading-none">
-        <span className={`text-sm font-semibold tracking-[-0.01em] ${tone === "inverse" ? "text-white" : "text-ink"}`}>
-          OptiWeb Studio
+        <span className={`text-sm tracking-[0.06em] whitespace-nowrap uppercase ${inverse ? "text-white" : "text-ink"}`}>
+          <span className="font-semibold">Unikit</span> <span className={`font-normal ${inverse ? "text-white/70" : "text-ink-soft"}`}>Studio</span>
         </span>
-        <span
-          className={`mt-1 font-mono text-2xs tracking-[0.1em] uppercase ${tone === "inverse" ? "text-white/60" : "text-muted"}`}
-        >
-          Make every byte count
-        </span>
+        {tagline ? <span className={`mt-1 font-mono text-2xs tracking-[0.1em] uppercase ${inverse ? "text-white/60" : "text-muted"}`}>{BRAND_TAGLINE}</span> : null}
       </span>
     </span>
   );

@@ -1,4 +1,10 @@
-/** Typed browser client for the /api/v1 contract. Unwraps the response envelope. */
+/**
+ * Browser client for the one thing the server does: the website audit.
+ *
+ * It sends JSON and nothing else. It has no way to send a file: there is no
+ * FormData or Blob path here, and the server has no route that would take one.
+ * Requests go to this site's own origin only.
+ */
 import { describeNonJsonResponse } from "@/lib/api-problem";
 
 export class ApiClientError extends Error {
@@ -15,46 +21,27 @@ export class ApiClientError extends Error {
   }
 }
 
-type FailureBody = {
-  ok: false;
-  error: { code: string; message: string; hint?: string; details?: unknown };
-};
-
-export type RequestOptions = {
-  signal?: AbortSignal;
-};
+type FailureBody = { ok: false; error: { code: string; message: string; hint?: string } };
 
 function isAbortError(error: unknown): boolean {
-  return (
-    (error instanceof DOMException && error.name === "AbortError") ||
-    (error instanceof Error && error.name === "AbortError")
-  );
+  return error instanceof Error && error.name === "AbortError";
 }
 
-async function request<T>(path: string, init: RequestInit): Promise<T> {
+async function request<T>(path: string, init: { method: "GET" | "POST"; json?: unknown; signal?: AbortSignal }): Promise<T> {
   let response: Response;
   try {
-    const apiBase = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
-    response = await fetch(`${apiBase}${path}`, {
-      ...init,
-      credentials: apiBase ? "include" : "same-origin",
-      headers:
-        init.body instanceof FormData
-          ? init.headers
-          : { "content-type": "application/json", ...(init.headers ?? {}) },
+    response = await fetch(path, {
+      method: init.method,
+      signal: init.signal,
+      credentials: "omit",
+      headers: init.json === undefined ? undefined : { "content-type": "application/json" },
+      body: init.json === undefined ? undefined : JSON.stringify(init.json),
     });
   } catch (error) {
     if (isAbortError(error) || init.signal?.aborted) {
-      throw new ApiClientError("The request was cancelled.", {
-        code: "cancelled",
-        status: 0,
-      });
+      throw new ApiClientError("The request was cancelled.", { code: "cancelled", status: 0 });
     }
-    throw new ApiClientError("The network request could not be completed.", {
-      code: "network_error",
-      hint: "Check your connection and try again.",
-      status: 0,
-    });
+    throw new ApiClientError("The network request could not be completed.", { code: "network_error", hint: "Check your connection and try again.", status: 0 });
   }
 
   const text = await response.text();
@@ -68,71 +55,17 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
 
   if (!response.ok || (parsed as FailureBody | null)?.ok === false) {
     const failure = parsed as FailureBody | null;
-    throw new ApiClientError(failure?.error.message ?? "The request failed.", {
-      code: failure?.error.code ?? "unknown_error",
-      hint: failure?.error.hint,
+    throw new ApiClientError(failure?.error?.message ?? "The request failed.", {
+      code: failure?.error?.code ?? "unknown_error",
+      hint: failure?.error?.hint,
       status: response.status,
     });
   }
-
   return (parsed as { data: T }).data;
 }
 
 export const api = {
-  get: <T>(path: string, options?: RequestOptions) => request<T>(path, { method: "GET", signal: options?.signal }),
-  post: <T>(path: string, body?: unknown, options?: RequestOptions) =>
-    request<T>(path, {
-      method: "POST",
-      signal: options?.signal,
-      body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
-    }),
-  put: <T>(path: string, body: unknown, options?: RequestOptions) =>
-    request<T>(path, { method: "PUT", signal: options?.signal, body: JSON.stringify(body) }),
-  del: <T>(path: string, options?: RequestOptions) => request<T>(path, { method: "DELETE", signal: options?.signal }),
+  get: <T>(path: string, options?: { signal?: AbortSignal }) => request<T>(path, { method: "GET", signal: options?.signal }),
+  /** Sends a JSON document. `body` must be plain data. */
+  postJson: <T>(path: string, body: unknown, options?: { signal?: AbortSignal }) => request<T>(path, { method: "POST", json: body, signal: options?.signal }),
 };
-
-/**
- * URL of a stored artifact.
- * `download` → served as an attachment; otherwise → served inline so it can be
- * used as an <img> preview.
- */
-export function artifactUrl(id: string, download = true): string {
-  return `/api/v1/artifacts/${id}${download ? "?download=1" : "?inline=1"}`;
-}
-
-/** Triggers a browser download for the selected artifacts as one ZIP. */
-export async function downloadZip(ids: string[], name = "optiweb-results", signal?: AbortSignal): Promise<void> {
-  const response = await fetch(`${(import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "")}/api/v1/artifacts/zip`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ids, name }),
-    credentials: (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "") ? "include" : "same-origin",
-    signal,
-  });
-  if (!response.ok) {
-    let message = "The bundle could not be created.";
-    try {
-      const body = (await response.json()) as FailureBody;
-      message = body.error.message;
-    } catch {
-      /* keep default */
-    }
-    throw new ApiClientError(message, { code: "zip_failed", status: response.status });
-  }
-  const blob = await response.blob();
-  const disposition = response.headers.get("content-disposition") ?? "";
-  const match = /filename="([^"]+)"/.exec(disposition);
-  triggerDownload(URL.createObjectURL(blob), match?.[1] ?? `${name}.zip`);
-}
-
-export function triggerDownload(url: string, filename: string): void {
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  // The click is synchronous for blob: URLs; releasing on the next turn is safe
-  // and prevents the object URL from leaking for the life of the tab.
-  setTimeout(() => URL.revokeObjectURL(url), 0);
-}

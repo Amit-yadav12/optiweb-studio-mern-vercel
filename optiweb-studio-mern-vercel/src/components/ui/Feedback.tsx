@@ -105,7 +105,7 @@ export function EmptyState({
   return (
     <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
       <div className="grid size-10 place-items-center rounded-md border border-line bg-surface-sunken text-faint">
-        {icon ?? <Info className="size-4.5" />}
+        {icon ?? <Info className="size-4.5" aria-hidden />}
       </div>
       <div className="max-w-md">
         <p className="text-sm font-medium text-ink">{title}</p>
@@ -208,11 +208,11 @@ type ToastContextValue = { push: (toast: Omit<Toast, "id">) => void };
 const ToastContext = createContext<ToastContextValue | null>(null);
 
 const TOAST_ICON: Record<Tone, ReactNode> = {
-  neutral: <Info className="size-3.5" />,
-  accent: <Info className="size-3.5" />,
-  ok: <Check className="size-3.5" />,
-  warn: <AlertTriangle className="size-3.5" />,
-  danger: <AlertTriangle className="size-3.5" />,
+  neutral: <Info className="size-3.5" aria-hidden />,
+  accent: <Info className="size-3.5" aria-hidden />,
+  ok: <Check className="size-3.5" aria-hidden />,
+  warn: <AlertTriangle className="size-3.5" aria-hidden />,
+  danger: <AlertTriangle className="size-3.5" aria-hidden />,
 };
 
 export function ToastProvider({ children }: { children: ReactNode }) {
@@ -271,7 +271,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               aria-label="Dismiss notification"
               className="-mt-0.5 -mr-1 grid size-7 place-items-center rounded text-muted hover:bg-surface-sunken hover:text-ink"
             >
-              <X className="size-3.5" />
+              <X className="size-3.5" aria-hidden />
             </button>
           </div>
         ))}

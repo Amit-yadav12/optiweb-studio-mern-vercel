@@ -1,109 +1,181 @@
-# OptiWeb Studio
+# Unikit Studio
 
-**Make every byte count.** A focused developer workspace for image optimization, CSS font-loading analysis, asset inspection, and safe document-level website audits.
+Web-asset tools that run in your browser. Images are converted, stylesheets are
+patched and asset files are inspected by the page itself: the files you select
+are never uploaded.
 
-## Product capabilities
+| Tool | What it does | Where it runs |
+| --- | --- | --- |
+| Image Optimizer | Re-encodes images to WebP, AVIF, JPEG or PNG, caps dimensions, reports real output sizes, builds a ZIP | Your browser (a Web Worker of the tab) |
+| Font Optimizer | Finds `@font-face` rules without `font-display`, shows the exact change, gives the patched stylesheet | Your browser |
+| Asset Analyzer | Reads format, dimensions, weight and metadata from file headers | Your browser |
+| Website Audit | Fetches a public page and reports the resources it names | The server: a browser may not read another site's pages |
 
-- **High-capacity uploads:** with a private Vercel Blob store and MongoDB connected, the browser uploads files straight to storage (up to 25 MB each, 10 files and 150 MB per job) and a background job converts them. Jobs have states, real completion counts, retries, cancellation and recovery; results are streamed to the session that owns them. Storage per session, jobs in progress and application-wide budgets are enforced on the server. Without object storage the optimizer uses the standard upload below, and says so.
-- **Image Optimizer:** Sharp decodes uploads and produces bounded WebP, AVIF (only when the runtime encoder probe succeeds), JPEG, PNG, or source-format outputs. Input/output bytes, dimensions, processing time, and any negative savings are reported from real buffers. Animated sources are not silently flattened. Batches are concurrency-limited and constrained by actual request/artifact budgets.
-- **Font Optimizer:** PostCSS parses `@font-face` declarations, reports malformed rules and missing `font-display`, applies `auto`, `block`, `swap`, `fallback`, or `optional`, and offers the exact resulting stylesheet for copy/download.
-- **Asset Analyzer:** Up to ten files per analysis. Reports measured image format, dimensions, and size, plus clearly labelled heuristic recommendations, and can hand all analysed images to the Image Optimizer in one step. CSS is routed through the font analysis workflow. It does not infer a file's rendered dimensions on a website.
-- **Website Performance Audit:** Fetches a public document and a bounded set of discovered resources with SSRF checks, redirects revalidated, response caps, and time budgets. It can inspect up to three pages: the given page and same-origin pages it links to, 25 resources per page, at most 1 MB per document and per resource, within a total byte budget and a time budget. PageSpeed lab/field metrics appear only when the provider returns them. This is not a browser-rendered crawl.
-- **History and Settings:** Mongoose persists session-owned jobs, binary artifacts, and preferences in MongoDB Atlas. History is not durable when the database is not configured; the UI labels that state and disables artifact downloads rather than pretending they work. A converted image that could not be stored is returned with the response instead, so it can still be saved from the open tab; it is labelled as not stored and is not listed in History.
-- **Appearance:** Light, Dark, and System themes with a pre-paint theme bootstrap, persistent choice, and reduced-motion support.
+Earlier versions of this project (named OptiWeb Studio) uploaded images to a
+server, converted them there and stored results in a database and in object
+storage. All of that is gone. See [What changed in 2.0](#what-changed-in-20).
 
-A smaller image is not proof of improved LCP, INP, or CLS. Savings shown by the optimizer are measured byte differences; website-level performance depends on resource discovery, priority, rendering, and usage.
+## How a file is handled
 
-## Architecture
+1. You choose or drop a file. The page reads its first bytes and identifies it
+   from them, not from its name: format, dimensions, animation, metadata.
+2. The size check happens before anything is decoded. An image that would need
+   more memory than the device can spare is refused from its header.
+3. A Web Worker decodes the image, applies the EXIF rotation, resizes it if a
+   limit is set, and encodes it. WebP, JPEG and PNG come from the browser's own
+   encoder. AVIF comes from a WebAssembly encoder that this site serves and the
+   page loads the first time AVIF is needed (3.3 MB, about 1 MB compressed in
+   transit).
+4. The result stays in the tab's memory. Downloads and the ZIP are made there.
+   Leaving the page discards everything.
 
-- Frontend: React 19, TypeScript, Vite, React Router, Tailwind CSS v4; Inter and JetBrains Mono are locally bundled.
-- Backend: one Express 5 application in `src/app.ts`, shared by the local `src/index.ts` launcher, the Netlify Function and the Vercel Function.
-- Netlify adapter: `netlify/functions/api.ts` uses the documented `serverless-http` Express adapter. Netlify rewrites `/api/*` to this single function; the original `/api/...` path is retained for the existing Express routes.
-- Vercel adapter: `api/index.ts` exports the same Express app as a Vercel Function. `vercel.json` rewrites `/api/*` to it and falls back to `index.html` for client-side routes.
-- Database: MongoDB Atlas through Mongoose. The shared connection promise and warm-instance connection cache live in `src/server/db/mongo.ts`.
-- Object storage: a private Vercel Blob store behind `src/server/storage/objectStorage.ts`, for source uploads and generated files of the direct-upload pipeline. MongoDB keeps the records; the store keeps only bytes.
-- Background jobs: `src/server/pipeline/`. A job is a MongoDB record with a state and a lease; `worker.ts` claims and processes it, `cleanup.ts` applies retention and repairs interrupted work, `usage.ts` enforces quotas.
-- Image and CSS processing: Sharp with libvips; PostCSS.
+No request carries a file, a file name or a result. This is not a promise about
+how the server treats uploads: the server has no endpoint that accepts one.
 
-Both hosts are configured. A deployment that lacks its adapter serves the home page only: every `/api` request and every deep link gets the host's "not found" page. See "The API answers with a page instead of JSON" in [`docs/deployment.md`](docs/deployment.md).
+### What makes that checkable
 
-## Local development
+- **The server cannot take a file.** It has two routes: a health check and
+  `POST /api/v1/audits`, which reads a JSON body of at most 16 KB. There is no
+  multipart parser, no database driver and no storage client in the
+  dependencies. See [docs/api.md](docs/api.md).
+- **The browser is told to refuse.** Every page is served with a
+  Content-Security-Policy whose `connect-src`, `form-action` and `default-src`
+  are `'self'`. A script on the page cannot send data to another origin.
+- **A test watches the wire.** `npm run test:browser` drives the production
+  build in a real Chrome through a recording proxy, optimizes images, and
+  asserts that no request carried a body, a file name or image bytes. It also
+  repeats the work with the network cut off.
 
-Requirements: Node.js 22 (see `.nvmrc`) and npm.
+You can check it yourself: open the browser's developer tools on the Network
+tab and optimize an image.
+
+## Image Optimizer in detail
+
+- **Reads** JPEG, PNG, WebP, AVIF, GIF and BMP. A file the browser cannot decode
+  (TIFF and HEIC in Chrome) is reported as such, with a hint.
+- **Writes** WebP, AVIF, JPEG, PNG.
+- **Strategies**
+  - *Single*: write the chosen format. If the result is larger than the
+    original, the row says so and "Keep original" is offered for that file.
+  - *Best-effort*: encode each file as WebP, AVIF and (when it has no
+    transparency) JPEG, and keep the smallest of them.
+  - *No-regression*: as best-effort, but when no result is smaller than the
+    original, the original file is kept unchanged. A result is never larger.
+- **Quality** 30 to 100. **Maximum width and height** 16 to 16,000 px.
+  Proportions are kept and an image is never enlarged.
+- **Limits depend on the device**, because the device does the work:
+
+  | Device memory | Largest source image | Largest AVIF output | Files at once |
+  | --- | --- | --- | --- |
+  | 2 GB or less | 24 MP | 8 MP | 1 |
+  | up to 4 GB | 50 MP | 24 MP | up to 2 |
+  | more | 100 MP | 40 MP | up to 4 |
+
+  One processor core is always left for the page. A queue holds up to 300 files.
+- **Cancel** stops the batch at once by terminating the workers, which is what
+  frees their memory. Finished files keep their results.
+
+What the conversion does to a file, so there are no surprises:
+
+- Outputs are 8-bit sRGB. Wide-gamut and high-bit-depth sources are converted.
+- Outputs carry no metadata: no EXIF, no GPS position, no colour profile. The
+  EXIF rotation is applied to the pixels first, so the image still looks right.
+- Animated images (GIF, APNG, animated WebP and AVIF) and SVG are refused
+  rather than flattened to one frame.
+- JPEG has no transparency: transparent areas become white.
+
+## Run it locally
+
+Requires Node 22.
 
 ```bash
-cd optiweb-studio-mern-vercel
 npm ci
-cp .env.example .env
-# Set MONGODB_URI in .env only if you have a dedicated, authorized development database.
-npm run dev
+npm run dev        # the app on http://localhost:5173, the API on :5000
 ```
 
-Vite serves `http://localhost:5173` and proxies same-origin `/api` requests to Express at `http://localhost:5000`. You can run the Netlify CLI proxy from this package directory with `npm run netlify:dev`; the command starts from the repository root so the checked-in nested `base` setting is interpreted correctly. The CLI requires its normal local runtime downloads/network access.
-
-## MongoDB Atlas configuration
-
-Set `MONGODB_URI` as a **server-side** environment variable in Netlify Site configuration (and in a local `.env` only for a trusted development database). Never use `VITE_MONGODB_URI`, paste credentials into source, or commit `.env` files. The URI should select the intended database, for example `/optiweb?retryWrites=true&w=majority`.
-
-Configure Atlas with a restricted database user and an IP/network policy that matches the Netlify function's configured static egress or private connectivity. Do not leave `0.0.0.0/0` as a permanent access rule. Confirm that your Netlify plan, function region, and Atlas network policy can reach one another before calling persistence verified.
-
-Collections are `optiweb_jobs`, `optiweb_artifacts`, and `optiweb_preferences`. Artifact documents use a TTL index. Guest data is scoped to an opaque HTTP-only `ow_sid` cookie; this is session history, not an account system. Image artifacts are deliberately bounded for Function and MongoDB document limits. Larger files need a separately designed object-storage/worker path.
-
-Health: `/api/v1/health` reports whether MongoDB is ready for reads and writes, with the measured latency of the check, without revealing the URI. It always answers `200`, so check `data.database.ready`. When it is false, `data.database.category` names the cause, for example `not_configured`, `authentication_failed` or `network_access_denied`. The full list and the log format are in `docs/deployment.md` under "Storage diagnostics".
-
-## Netlify deployment
-
-The repository root contains `netlify.toml`; the application lives in `optiweb-studio-mern-vercel/`. The config sets the Base directory, build command, publish directory, functions directory, esbuild bundler, and the API rewrite ahead of the SPA fallback.
-
-1. Connect this GitHub repository to Netlify and use the checked-in settings. Do not set a second conflicting base/publish directory in the UI.
-2. Add `MONGODB_URI` in the Netlify environment variable panel for the Deploy Preview and Production contexts where persistence is intended. Add `PAGESPEED_API_KEY` only if PageSpeed Insights is desired.
-3. Build and deploy a Deploy Preview first. Verify `/`, `/api/v1/health`, the function logs, MongoDB connection state, image upload/processing, stored artifact download, CSS patch/download, history refresh/deletion, and mobile/theme states.
-4. Promote only after the preview workflows pass. Production promotion is intentionally not automated by this repository.
-
-Netlify's current default buffered Function limit is 6 MB, while binary requests are Base64 encoded and effectively limited to about 4.5 MB; synchronous execution is limited to 60 seconds. This API buffers request/response bodies, so its tighter defaults are 1 MB/file, 3.8 MB total multipart content, 3.5 MB/artifact and 3.5 MB/ZIP. Multipart framing also consumes request budget. Do not increase these caps without testing the actual plan, binary overhead, response path, and Sharp memory/time budget. The Netlify Function externalizes Express, Mongoose, and Sharp so their runtime packages/native libvips dependency are included as server modules.
-
-See [`docs/deployment.md`](docs/deployment.md) for the release checklist and [`docs/api.md`](docs/api.md) for route contracts.
-
-## Verification commands
+Production build and server:
 
 ```bash
-npm ci
-npm run build
-npm run typecheck
-npm run lint
-npm run test:a11y
-npm run test:function
-npm run test:ui
-npm run test:dom
-npm run test:storage
-npm run test:pipeline
-npm run test:dom:direct
-npm run test:audit
+npm run build      # typecheck, then build the app into dist/
+npm start          # serves dist/ and the API on PORT (default 5000)
 ```
 
-`test:function` exercises the real `serverless-http` handler with synthetic Netlify-style events, including the API path, cookies, JSON, Base64 multipart uploads, Sharp conversion, and safe errors. It intentionally refuses to run when `MONGODB_URI` or `MONGO_URL` is present and explicitly verifies the no-database state; it does **not** test Atlas persistence.
+No environment variable is required. [.env.example](.env.example) lists the
+optional ones: a PageSpeed Insights key and the limits of the website audit.
 
-`test:storage` makes MongoDB fail in each diagnosed way without needing a database, `test:ui` renders the image results panel for each outcome, and `test:dom` uses the real Image Optimizer screen in jsdom from upload to download. None of them tests real persistence; `npm run test:storage:mongo` does, against a disposable database (CI runs it against a `mongo:7` container).
+## Tests
 
-`test:pipeline` drives the direct-upload pipeline through the HTTP API on the local storage driver, and `test:dom:direct` drives the Image Optimizer screen in that mode. Both use MongoDB when `MONGODB_URI` names a throwaway database (CI does), and an in-memory stand-in otherwise. Neither exercises Vercel Blob itself. `test:audit` checks the website audit's limits without network, and `npm run bench:capacity` measures processing time and memory on the machine it runs on (results: [`docs/capacity-benchmark.md`](docs/capacity-benchmark.md)).
+```bash
+npm test                 # every suite; the browser suite if a browser is found
+npm test -- --browser    # fail, instead of skip, when no browser is found
+npm test -- unit api     # only the named suites
+```
 
-`npm run smoke -- <base-url>` checks a deployed site from outside: the app, a deep link, the API, and one conversion with its download. It uploads one small generated image.
+| Suite | Command | What it checks |
+| --- | --- | --- |
+| unit | `npm run test:unit` | Image header parser against real files, checks before decoding, planner, CSS and asset analysis, settings |
+| pipeline | `npm run test:pipeline` | The steps of the image pipeline and the engine's scheduling, cancelling and fallback |
+| ui | `npm run test:ui` | The result model: sizes, savings, kept originals, totals |
+| dom | `npm run test:dom` | The Image Optimizer screen in a simulated DOM, from choosing files to the ZIP |
+| audit | `npm run test:audit` | The website audit and its limits against a made-up site, with no network |
+| api | `npm run test:api` | The HTTP contract: what is answered, what is refused, no cookies, no upload |
+| security | `npm run test:security` | Source, dependencies, headers and the build: nothing that could send, receive or keep a file |
+| function | `npm run test:function` | The Netlify function adapter |
+| a11y | `npm run test:a11y` | Every page rendered: headings, landmarks, names, labels; colour contrast of the tokens |
+| browser | `npm run test:browser` | The production build in a real Chrome: files never leave the tab; real outputs, sizes, rotation, limits, cancel |
 
-`npm test` and `npm run test:security` target a running API and require a separate isolated test database because they create/delete test records. Never point those scripts at production. Browser-based visual/axe testing and live Netlify deployment checks must still be performed in an environment with a browser, Netlify account, and configured test database.
+The browser suite needs Chrome or Chromium. It looks for `CHROME_PATH`, then an
+installed browser, then the `@sparticuz/chromium` package
+(`npm install --no-save @sparticuz/chromium` brings its own). Set
+`UNIKIT_TEST_DEVICE="cores=4,memory=8"` to run it as a device of that size.
 
-## Security and operational boundaries
+`npm run smoke -- <url>` checks a running site through public requests:
+see [docs/deployment.md](docs/deployment.md).
 
-- Upload sizes, file counts, decoded pixel count, transform concurrency, artifact bytes, ZIP bytes, and CSS size are bounded server-side.
-- Upload content is decoded/sniffed by Sharp rather than trusted from the filename or declared MIME type.
-- Remote audit requests reject private/reserved destinations, pin validated DNS results, re-check redirect destinations, cap body sizes, and use timeouts.
-- Session identifiers are HTTP-only, `SameSite=Lax`, and `Secure` in production. Jobs and artifacts are queried by both id and session.
-- Internal exception messages and request payloads are not written to server logs. `X-Request-Id` is available as a safe support reference.
-- Rate limiting is process-local. A horizontally scaled production service should use a shared limiter if stronger global quotas are required.
+## Deployment
 
-## Known limitations
+The app is a static site plus one small function. It is configured for Vercel
+(`vercel.json`), Netlify (`../netlify.toml`) and any Node host (`npm start`).
+There is nothing to provision: no database, no storage, no secret.
+[docs/deployment.md](docs/deployment.md) has the details and the checks to run
+after a deploy.
 
-- Guest history is browser-session scoped and does not sync across devices.
-- Binary artifacts are stored in MongoDB only within the current conservative limits; no object-storage backend exists.
-- The Website Audit inspects initial HTML and discovered resources, not browser-rendered JavaScript or a full site crawl.
-- Atlas persistence, account-specific egress/network access, Netlify Deploy Preview, and production status depend on hosting configuration and are not implied by a successful local build.
-- `DESIGN.md` was not present in the checkout when work began. The existing `src/styles.css`, `docs/design-tokens.md`, and the user-provided measured light-theme tokens were used as the available design references; the attached visual capture could not be checked here.
+## Project layout
+
+```
+api/index.ts                 Vercel function entry
+netlify/functions/api.ts     Netlify function entry
+src/index.ts                 Node server entry (npm start)
+src/app.ts                   The whole server: health, audit, refusals, static files
+src/server/                  Audit service, address filter (SSRF), rate limit, headers
+src/shared/                  Code used by both sides: image headers, CSS, asset analysis
+src/features/images/engine/  Inspect, plan, pipeline, worker, engine
+src/features/                The four tools and Settings
+src/components/, src/lib/    Interface parts and helpers
+public/                      Icons, manifest, theme script
+scripts/                     Self-tests, fixtures, smoke test
+docs/                        API, deployment, design tokens
+```
+
+## What changed in 2.0
+
+- Image conversion, stylesheet patching and asset analysis moved from the
+  server into the browser. The server-side image library, the database, object
+  storage, sessions, cookies, quotas, background jobs and the scheduled cleanup
+  were removed, with their endpoints. Old endpoints answer `410 Gone`.
+- AVIF output is always available, through a WebAssembly encoder.
+- History and Storage pages are gone: nothing is kept, so there is nothing to
+  list. Their addresses explain this instead of failing.
+- The product was renamed to Unikit Studio. The repository, the app directory
+  and the hosting projects keep their earlier names, because the hosts are
+  configured with them.
+- Settings moved from the server to the browser's `localStorage`.
+
+## Known limits
+
+- Encoding speed and the largest image depend on the visitor's device.
+- Chrome and Edge are the tested browsers (automated, Chromium). Firefox and
+  Safari use the same code paths, with the WebAssembly WebP encoder where their
+  canvas cannot write WebP; they are not covered by an automated test.
+- The website audit reads HTML and the resources it names. It does not run the
+  page's JavaScript.

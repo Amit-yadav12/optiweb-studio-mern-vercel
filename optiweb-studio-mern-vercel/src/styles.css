@@ -43,7 +43,7 @@
 :root { --font-inter: "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; --font-mono-code: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 
 /*
- * OptiWeb Studio design tokens.
+ * Unikit Studio design tokens.
  * Aesthetic: "editorial engineering instrument" — warm neutral paper, deep ink
  * text, hairline rules, monospaced measurement, one restrained cobalt accent.
  */
@@ -66,6 +66,8 @@
 
   --color-accent: #365ce6;
   --color-accent-hover: #2b4dc7;
+  /* Text on an accent-coloured surface (the primary button). */
+  --color-on-accent: #ffffff;
   --color-accent-soft: #edf1fe;
   --color-accent-border: #c4d1f8;
 
@@ -114,8 +116,8 @@
  * Dark theme.
  * Values were chosen so every meaningful text pair clears WCAG AA (4.5:1) on the
  * dark surfaces — see the contrast table in docs/design-tokens.md. Applied by
- * setting data-theme="dark" on <html>, which the inline bootstrap script does
- * before first paint so there is no flash of the light theme.
+ * setting data-theme="dark" on <html>, which /theme.js does before first paint,
+ * so there is no flash of the light theme.
  */
 :root[data-theme="dark"] {
   --color-canvas: #0d141c;
@@ -135,6 +137,8 @@
 
   --color-accent: #6f8cff;
   --color-accent-hover: #8aa2ff;
+  /* The dark theme's accent is light, so text on it is dark: white would reach only 3:1. */
+  --color-on-accent: #0a1017;
   --color-accent-soft: #17233d;
   --color-accent-border: #2c3d63;
 
@@ -170,7 +174,8 @@
     color: var(--color-ink);
     font-family: var(--font-sans);
     font-size: var(--text-base);
-    font-feature-settings: "cv11", "ss01";
+    /* "calt" off: Inter's contextual alternates turn the x in "800x600" into a multiplication sign, which would misspell file names. */
+    font-feature-settings: "cv11", "ss01", "calt" 0;
     -webkit-font-smoothing: antialiased;
   }
 
@@ -222,9 +227,9 @@
   }
 
   /* Session-scoped motion preference (Settings → Minimise interface motion). */
-  .ow-reduce-motion *,
-  .ow-reduce-motion *::before,
-  .ow-reduce-motion *::after {
+  .uk-reduce-motion *,
+  .uk-reduce-motion *::before,
+  .uk-reduce-motion *::after {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
@@ -272,7 +277,7 @@
 }
 
 /* ---------- Motion ---------- */
-@keyframes ow-fade-up {
+@keyframes uk-fade-up {
   from {
     opacity: 0;
     transform: translateY(4px);
@@ -283,7 +288,7 @@
   }
 }
 
-@keyframes ow-indeterminate {
+@keyframes uk-indeterminate {
   0% {
     transform: translateX(-100%);
   }
@@ -292,7 +297,7 @@
   }
 }
 
-@keyframes ow-pulse-soft {
+@keyframes uk-pulse-soft {
   0%,
   100% {
     opacity: 1;
@@ -303,15 +308,15 @@
 }
 
 @utility animate-fade-up {
-  animation: ow-fade-up 180ms ease-out both;
+  animation: uk-fade-up 180ms ease-out both;
 }
 
 @utility animate-indeterminate {
-  animation: ow-indeterminate 1.15s cubic-bezier(0.4, 0.1, 0.6, 0.9) infinite;
+  animation: uk-indeterminate 1.15s cubic-bezier(0.4, 0.1, 0.6, 0.9) infinite;
 }
 
 @utility animate-pulse-soft {
-  animation: ow-pulse-soft 1.4s ease-in-out infinite;
+  animation: uk-pulse-soft 1.4s ease-in-out infinite;
 }
 
 /* ---------- Code / diff presentation ---------- */

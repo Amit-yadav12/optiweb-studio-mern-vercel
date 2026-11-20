@@ -1,415 +1,155 @@
 #!/usr/bin/env node
 /**
- * Outcome self-test for the image optimizer screen. Needs no browser, server
- * or database.
+ * Self-test of what the Image Optimizer shows about a result. Needs no browser.
  *
  *   npm run test:ui
  *
- * It renders the real results panel to HTML for each kind of API response and
- * checks what a person is told and offered:
- *
- *  - converted and stored: downloads and a History link, built from the IDs of
- *    the stored files;
- *  - converted but not stored: the reason from the server, and no download,
- *    preview, ZIP or History link anywhere in the markup;
- *  - converted, not stored, but the files came with the response: each file
- *    can be saved from a blob: URL held in the tab, and the wording says the
- *    copy is not stored. No artifact URL or History link appears;
- *  - conversion failed: said as such, with nothing to download.
- *
- * It also checks that the three outcomes are told apart by title, tone and
- * icon, that a response which contradicts itself is treated as not stored,
- * and the wording for an API path that answers with something other than JSON.
+ * Every number on the results screen is derived in `src/features/images/model.ts`
+ * from two measured things: the size of the selected file (`File.size`) and the
+ * size of the file the browser encoded (`Blob.size`). This test builds results
+ * from real `File` and `Blob` objects of known sizes and checks what the model
+ * makes of them: which file is offered, under which name, what "saved" says,
+ * when the original is offered instead, and what the batch totals add up to.
  */
-import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
-import { MemoryRouter } from "react-router-dom";
-import JSZip from "jszip";
-import sharp from "sharp";
-import { createChecker } from "./lib/selftest-kit.mjs";
+import { createChecker, fixture } from "./lib/selftest-kit.mjs";
 
 const { check, section, report, crashed } = createChecker("ui-outcome-selftest");
 process.on("uncaughtException", (error) => { crashed(error); process.exit(1); });
 process.on("unhandledRejection", (error) => { crashed(error); process.exit(1); });
 
-const { describeImageOutcome, inlineOutputOf, settleResult, storedArtifactId } = await import("../src/features/images/outcome.ts");
-const { createLocalOutput, zipLocalOutputs } = await import("../src/features/images/localOutput.ts");
-const { describeNonJsonResponse } = await import("../src/lib/api-problem.ts");
-const { ImageReview } = await import("../src/features/images/ImageReview.tsx");
-const { StorageNotice } = await import("../src/components/ui/StorageNotice.tsx");
+const model = await import("../src/features/images/model.ts");
+const plan = await import("../src/features/images/engine/plan.ts");
+const { formatBytes, formatSavingsPercent } = await import("../src/lib/format.ts");
 
-/* ------------------------------------------------------------------ fixtures */
+const blobOf = (size, type = "image/webp") => new Blob([new Uint8Array(size)], { type });
+const settings = { format: "webp", quality: 78, maxWidth: null, maxHeight: null, strategy: "single" };
 
-const JOB = "99999999-9999-4999-8999-999999999999";
-const ARTIFACT_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const ARTIFACT_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-/** Per-response result IDs. They are not download IDs and must never appear in a link. */
-const RESULT_ID_A = "0000000a-0000-4000-8000-00000000000a";
-const RESULT_ID_B = "0000000b-0000-4000-8000-00000000000b";
-
-const FAILURE = {
-  persisted: false,
-  category: "network_access_denied",
-  message: "MongoDB refused the connection from this server.",
-  hint: "In Atlas, open Network Access and allow this server.",
-};
-
-const converted = (filename, id, artifactId) => ({
-  id: artifactId ?? id,
-  artifactId,
-  filename,
-  outputFilename: filename.replace(/\.\w+$/, "-optiweb.webp"),
-  status: "completed",
-  inputContentType: "image/png",
-  durationMs: 12,
-  inputBytes: 1000,
-  outputBytes: 400,
-  savedBytes: 600,
-  savingsPercent: 60,
-  inputWidth: 40,
-  inputHeight: 30,
-  outputWidth: 40,
-  outputHeight: 30,
-  outputFormat: "webp",
-});
-const rejected = (filename) => ({
-  id: "0000000c-0000-4000-8000-00000000000c",
-  artifactId: null,
-  filename,
-  outputFilename: filename,
-  status: "failed",
-  errorCode: "unsupported_image",
-  message: "This file is not a supported image.",
-  inputContentType: "image/png",
-  durationMs: 3,
-  inputBytes: 20,
-  outputBytes: 0,
-  savedBytes: 0,
-  savingsPercent: 0,
-  inputWidth: null,
-  inputHeight: null,
-  outputWidth: null,
-  outputHeight: null,
-  outputFormat: null,
-});
-
-/** Real WebP files, used as the bytes a response carries for an unstored result. */
-const WEBP_A = await sharp({ create: { width: 40, height: 30, channels: 3, background: { r: 36, g: 92, b: 230 } } }).webp().toBuffer();
-const WEBP_B = await sharp({ create: { width: 40, height: 30, channels: 3, background: { r: 220, g: 60, b: 90 } } }).webp().toBuffer();
-const inlineOf = (bytes, contentType = "image/webp") => ({ encoding: "base64", contentType, bytes: bytes.length, data: bytes.toString("base64") });
-/** A converted, unstored result whose file came with the response. */
-const sentBack = (filename, id, bytes) => ({ ...converted(filename, id, null), outputBytes: bytes.length, savedBytes: 1000 - bytes.length, inlineOutput: inlineOf(bytes) });
-/** A converted, unstored result that did not fit in the response. */
-const tooLarge = (filename, id) => ({ ...converted(filename, id, null), inlineOutput: null, inlineSkipped: "too_large" });
-
-function responseOf(results, stored) {
-  const done = results.filter((result) => result.status === "completed");
-  const inputBytes = results.reduce((sum, result) => sum + result.inputBytes, 0);
-  const outputBytes = done.reduce((sum, result) => sum + result.outputBytes, 0);
+let ids = 0;
+/** A queue item as the screen holds it. `sizes` are the byte counts of the encoded candidates, null for one that failed. */
+function item(file, { status = "done", formats = ["webp"], sizes = [100], strategy = "single", preferOriginal = false, width = 800, height = 600, outputWidth = width, outputHeight = height, source = {} } = {}) {
+  const sourceInfo = { format: "jpeg", mime: "image/jpeg", width, height, orientation: null, mayHaveAlpha: false, metadata: { exif: false, gps: false, icc: false, xmp: false }, traits: [], nameMismatch: null, ...source };
+  if (status !== "done") return { id: `file-${(ids += 1)}`, file, status, source: status === "rejected" || status === "checking" ? null : sourceInfo, problem: null, stage: null, outcome: null };
+  const candidates = formats.map((format, index) => ({ format, quality: 78, note: format, blob: sizes[index] === null ? null : blobOf(sizes[index], plan.OUTPUT_MIME[format]), problem: sizes[index] === null ? "failed" : null, encoder: format === "avif" ? "wasm" : "browser", ms: 5 }));
+  const selection = plan.selectOutcome(strategy, file.size, candidates);
   return {
-    jobId: stored ? JOB : "",
-    persisted: stored,
-    storage: stored ? { persisted: true } : FAILURE,
-    status: done.length === 0 ? "failed" : done.length < results.length ? "partial" : "completed",
-    results,
-    totals: { inputBytes, outputBytes, savedBytes: done.reduce((sum, result) => sum + result.savedBytes, 0), savingsPercent: 60 },
+    id: `file-${(ids += 1)}`,
+    file,
+    status,
+    source: sourceInfo,
+    problem: null,
+    stage: null,
+    outcome: { result: { id: "x", decodedWidth: width, decodedHeight: height, outputWidth, outputHeight, resized: outputWidth !== width, usesTransparency: null, flattened: false, candidates, decodeMs: 3 }, skipped: [], selection, preferOriginal, durationMs: 12, settingsKey: model.settingsKey({ ...settings, strategy }) },
   };
 }
 
-/**
- * Queue entries exactly as the optimizer builds them: `settleResult` decides
- * whether a file has a stored download, and a file that came with the response
- * is decoded into a copy held in the tab.
- */
-const itemsOf = (response, earlier = []) => [
-  ...earlier,
-  ...response.results.map((result, index) => {
-    const inline = inlineOutputOf(response, result);
-    return {
-      key: `item-${earlier.length + index}`,
-      file: new File([new Uint8Array(8)], result.filename, { type: "image/png" }),
-      preview: `blob:local-preview-${earlier.length + index}`,
-      ...settleResult(response, result),
-      localOutput: inline ? createLocalOutput(inline, result.outputFilename) : null,
-    };
-  }),
-];
+const photoBytes = fixture("photo-800x600.jpg");
+const photo = new File([photoBytes], "photo-800x600.jpg", { type: "image/jpeg" });
+const flat = new File([fixture("flat-600x400.png")], "flat-600x400.png", { type: "image/png" });
 
-function render(response, items = itemsOf(response)) {
-  const html = renderToStaticMarkup(
-    createElement(MemoryRouter, null, createElement(ImageReview, { response, items, zipping: false, onDownloadAll() {}, onDownloadLocal() {}, onReset() {} })),
-  );
-  const attribute = (tag, name) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1]?.replace(/&amp;/g, "&") ?? null;
-  return {
-    html,
-    /** Every link that saves a file: `<a>` elements with a `download` attribute. */
-    downloads: Array.from(html.matchAll(/<a\b[^>]*>/g), (match) => match[0])
-      .filter((tag) => /\sdownload(=|\s|>)/.test(tag))
-      .map((tag) => ({ href: attribute(tag, "href") ?? "", name: attribute(tag, "download") })),
-    text: html.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'").replace(/&amp;/g, "&").replace(/\s+/g, " "),
-    hrefs: Array.from(html.matchAll(/href="([^"]*)"/g), (match) => match[1].replace(/&amp;/g, "&")),
-    sources: Array.from(html.matchAll(/src="([^"]*)"/g), (match) => match[1].replace(/&amp;/g, "&")),
-    noticeTone: /data-tone="([a-z]+)"/.exec(html)?.[1] ?? null,
-  };
-}
-
-/**
- * True when the markup offers nothing that depends on stored output: no
- * artifact URL, no History or Inspect link, and nothing saved or shown from
- * anywhere but a blob: URL held in the tab.
- */
-function offersNothingStored(view) {
-  return (
-    !view.html.includes("/api/v1/artifacts") &&
-    !view.html.includes("/app/history") &&
-    !view.html.includes("/app/assets?inspect") &&
-    view.downloads.every((link) => link.href.startsWith("blob:")) &&
-    view.sources.every((source) => source.startsWith("blob:"))
-  );
-}
-
-/** True when the markup offers no download of any kind. */
-function offersNoDownload(view) {
-  return offersNothingStored(view) && view.downloads.length === 0 && !view.text.includes("Download all") && !/\sdownload(=|\s|>)/.test(view.html);
-}
-
-const storedBoth = responseOf([converted("first.png", RESULT_ID_A, ARTIFACT_A), converted("second.png", RESULT_ID_B, ARTIFACT_B)], true);
-const storedPartly = responseOf([converted("first.png", RESULT_ID_A, ARTIFACT_A), rejected("broken.png")], true);
-const notStoredBoth = responseOf([converted("first.png", RESULT_ID_A, null), converted("second.png", RESULT_ID_B, null)], false);
-const notStoredPartly = responseOf([converted("first.png", RESULT_ID_A, null), rejected("broken.png")], false);
-const failedStored = responseOf([rejected("broken.png")], true);
-const failedNotStored = responseOf([rejected("broken.png")], false);
-
-/* ------------------------------------------------------ 1. outcome decision */
-section("outcome for each combination of conversion and storage");
+/* ------------------------------------------------------------- one result */
+section("one result: the offered file, its name and its numbers");
 {
-  const table = [
-    ["all converted, stored", storedBoth, "stored", "ok", true, JOB],
-    ["partly converted, stored", storedPartly, "stored", "warn", true, JOB],
-    ["all converted, not stored", notStoredBoth, "converted_not_stored", "warn", false, null],
-    ["partly converted, not stored", notStoredPartly, "converted_not_stored", "warn", false, null],
-    ["nothing converted, job stored", failedStored, "conversion_failed", "danger", false, JOB],
-    ["nothing converted, not stored", failedNotStored, "conversion_failed", "danger", false, null],
+  const converted = item(photo, { sizes: [90_174] });
+  const final = model.finalOf(converted);
+  check("the offered file is the encoder's Blob itself", final.blob === converted.outcome.result.candidates[0].blob && final.isOriginal === false);
+  check("\"After\" is that Blob's size: 90,174 bytes, shown as 88.1 KB", final.bytes === 90_174 && final.bytes === final.blob.size && formatBytes(final.bytes) === "88.1 KB");
+  check("\"Before\" is the selected file's size: 164,543 bytes, shown as 160.7 KB", converted.file.size === photoBytes.length && photoBytes.length === 164_543 && formatBytes(converted.file.size) === "160.7 KB");
+  check("\"Saved\" is the difference of the two: 74,369 bytes, +45.2%", final.savedBytes === 164_543 - 90_174 && final.savingsPercent === 45.2 && formatSavingsPercent(final.savingsPercent) === "+45.2%" && final.grew === false);
+  check("the name is the source's name with a suffix and the new extension", final.filename === "photo-800x600-optimized.webp" && final.formatLabel === "WebP" && final.format === "webp");
+  check("the size is the output's size, and how it was encoded is stated", final.width === 800 && final.height === 600 && final.encoder === "browser");
+  const resized = model.finalOf(item(photo, { sizes: [9_000], outputWidth: 200, outputHeight: 150 }));
+  check("a resized result reports the output's dimensions, not the source's", resized.width === 200 && resized.height === 150);
+  const avif = model.finalOf(item(photo, { formats: ["avif"], sizes: [128_079] }));
+  check("an AVIF result names the WebAssembly codec as its encoder", avif.encoder === "wasm" && avif.filename === "photo-800x600-optimized.avif" && avif.formatLabel === "AVIF");
+}
+
+section("a result that is larger than its original is shown as larger, and the original is offered");
+{
+  const larger = item(flat, { formats: ["jpeg"], sizes: [4_994], source: { format: "png" } });
+  const final = model.finalOf(larger);
+  check("the growth is reported as it is: 670 → 4,994 bytes, −645.4%", final.bytes === 4_994 && final.savedBytes === -4_324 && final.savingsPercent === -645.4 && final.grew === true && formatSavingsPercent(final.savingsPercent) === "-645.4%");
+  check("the screen is told to offer the original for this file", model.convertedIsNotSmaller(larger) === true);
+  const kept = { ...larger, outcome: { ...larger.outcome, preferOriginal: true } };
+  const keptFinal = model.finalOf(kept);
+  check("after \"Keep original\", the offered file is the selected File object itself, byte for byte", keptFinal.blob === flat && keptFinal.isOriginal === true && keptFinal.bytes === 670);
+  check("it keeps its own name and format, and shows 0 saved instead of a loss", keptFinal.filename === "flat-600x400.png" && keptFinal.formatLabel === "PNG" && keptFinal.format === null && keptFinal.savedBytes === 0 && keptFinal.savingsPercent === 0 && keptFinal.grew === false && keptFinal.encoder === null);
+  check("the reason says it was the user's choice", /You chose to keep the original/.test(keptFinal.originalReason));
+  check("the converted file is still known, so the choice can be undone", model.chosenCandidate(kept.outcome).blob.size === 4_994 && model.convertedIsNotSmaller(kept) === true);
+  const equal = item(photo, { sizes: [photo.size] });
+  check("a result of exactly the same size also counts as \"not smaller\"", model.convertedIsNotSmaller(equal) === true && model.finalOf(equal).grew === false && model.finalOf(equal).savedBytes === 0);
+  check("a smaller result does not", model.convertedIsNotSmaller(item(photo, { sizes: [photo.size - 1] })) === false);
+}
+
+section("strategies");
+{
+  const best = item(photo, { strategy: "best-effort", formats: ["webp", "avif", "jpeg"], sizes: [90_174, 128_079, 68_866] });
+  check("best-effort offers the smallest of the encoded files: the 68,866-byte JPEG", model.finalOf(best).bytes === 68_866 && model.finalOf(best).format === "jpeg" && model.finalOf(best).filename === "photo-800x600-optimized.jpg");
+  const partial = item(photo, { strategy: "best-effort", formats: ["webp", "avif", "jpeg"], sizes: [null, 128_079, null] });
+  check("a format that failed is left out of the comparison", model.finalOf(partial).format === "avif");
+  const grewBest = item(flat, { strategy: "best-effort", formats: ["webp", "avif", "jpeg"], sizes: [1_438, 700, 4_994], source: { format: "png" } });
+  check("best-effort can still be larger than the original, and then says so", model.finalOf(grewBest).bytes === 700 && model.finalOf(grewBest).grew === true && model.convertedIsNotSmaller(grewBest) === true);
+  const safe = item(flat, { strategy: "no-regression", formats: ["webp", "avif", "jpeg"], sizes: [1_438, 700, 4_994], source: { format: "png" } });
+  const safeFinal = model.finalOf(safe);
+  check("no-regression offers the original in that case, with the reason", safeFinal.isOriginal === true && safeFinal.blob === flat && safeFinal.bytes === 670 && /at least as large as the original/.test(safeFinal.originalReason), JSON.stringify({ ...safeFinal, blob: undefined }));
+  check("and nothing is offered as an alternative: there is no converted file to prefer", model.chosenCandidate(safe.outcome) === null && model.convertedIsNotSmaller(safe) === false);
+  const won = item(flat, { strategy: "no-regression", formats: ["webp", "avif"], sizes: [1_438, 624], source: { format: "png" } });
+  check("no-regression offers a converted file when one is smaller: 624 bytes instead of 670", model.finalOf(won).bytes === 624 && model.finalOf(won).isOriginal === false && model.finalOf(won).savedBytes === 46);
+  const nothing = item(photo, { strategy: "no-regression", formats: ["webp", "avif"], sizes: [null, null] });
+  check("when no format could be encoded, no-regression still has a file to offer: the original", model.finalOf(nothing).isOriginal === true && /No format could be encoded/.test(model.finalOf(nothing).originalReason));
+}
+
+section("files without a result offer nothing");
+{
+  const states = ["checking", "ready", "rejected", "queued", "processing", "failed", "cancelled"];
+  check("only a finished file has a download", states.every((status) => model.finalOf(item(photo, { status })) === null));
+  check("every state has a label and a tone for its chip", [...states, "done"].every((status) => typeof model.STATUS_LABEL[status]?.label === "string" && ["neutral", "accent", "ok", "warn", "danger"].includes(model.STATUS_LABEL[status].tone)));
+  check("a refused file reads \"not accepted\", in the danger tone", model.STATUS_LABEL.rejected.label === "not accepted" && model.STATUS_LABEL.rejected.tone === "danger");
+}
+
+/* -------------------------------------------------------------- the batch */
+section("batch totals: sums of real sizes, over the files that have a result");
+{
+  const items = [
+    item(photo, { sizes: [90_174] }),
+    item(flat, { formats: ["jpeg"], sizes: [4_994], source: { format: "png" } }),
+    item(new File([new Uint8Array(1_000)], "c.png"), { strategy: "no-regression", formats: ["webp"], sizes: [2_000] }),
+    item(new File([new Uint8Array(5_000)], "d.tiff"), { status: "failed" }),
+    item(new File([new Uint8Array(7_000)], "e.gif"), { status: "rejected" }),
+    item(new File([new Uint8Array(9_000)], "f.jpg"), { status: "cancelled" }),
+    item(new File([new Uint8Array(3_000)], "g.jpg"), { status: "ready" }),
   ];
-  for (const [name, response, kind, tone, downloads, historyJobId] of table) {
-    const outcome = describeImageOutcome(response);
-    check(
-      `${name} → ${kind} (${tone})`,
-      outcome.kind === kind && outcome.tone === tone && outcome.downloadsAvailable === downloads && outcome.tabDownloads === 0 && outcome.historyJobId === historyJobId && outcome.toast.tone === tone,
-      JSON.stringify({ kind: outcome.kind, tone: outcome.tone, downloads: outcome.downloadsAvailable, history: outcome.historyJobId }),
-    );
-  }
-  const titles = new Set([storedBoth, notStoredBoth, failedStored].map((response) => describeImageOutcome(response).title));
-  const toasts = new Set([storedBoth, notStoredBoth, failedStored].map((response) => describeImageOutcome(response).toast.title));
-  check("the three outcomes have three different titles and three different toasts", titles.size === 3 && toasts.size === 3);
-  const notStored = describeImageOutcome(notStoredBoth);
-  check("not stored: the reason, hint and category come from the response", notStored.storageFailure?.message === FAILURE.message && notStored.storageFailure?.hint === FAILURE.hint && notStored.storageFailure?.category === FAILURE.category);
-  check("not stored: the toast says so and gives the reason", notStored.toast.title === "Converted, but not stored" && notStored.toast.description?.includes(FAILURE.message) && notStored.toast.description?.includes("Nothing can be downloaded"));
-  check("stored: there is no storage failure", describeImageOutcome(storedBoth).storageFailure === null && describeImageOutcome(storedBoth).storage.label === "Stored");
-  check("badges name conversion and storage separately", notStored.conversion.label === "Converted" && notStored.storage.label === "Not stored" && describeImageOutcome(storedPartly).conversion.label === "Partly converted" && describeImageOutcome(failedStored).conversion.label === "Conversion failed");
+  const summary = model.summarize(items);
+  const input = 164_543 + 670 + 1_000;
+  const output = 90_174 + 4_994 + 1_000;
+  check("three files have a result: two converted, one original kept", summary.done === 3 && summary.converted === 2 && summary.keptOriginal === 1);
+  check("the input total counts only those three files", summary.inputBytes === input, `${summary.inputBytes} vs ${input}`);
+  check("the output total counts what is actually offered, the kept original at its own size", summary.outputBytes === output, `${summary.outputBytes} vs ${output}`);
+  check("saved and its percentage follow from the two totals", summary.savedBytes === input - output && summary.savingsPercent === Math.round(((input - output) / input) * 1000) / 10);
+  check("one result is larger than its original, and is counted", summary.grew === 1);
+  check("failed, refused and cancelled files are counted separately and add no bytes", summary.failed === 1 && summary.rejected === 1 && summary.cancelled === 1);
+  const afterKeeping = model.summarize(items.map((entry, index) => (index === 1 ? { ...entry, outcome: { ...entry.outcome, preferOriginal: true } } : entry)));
+  check("keeping the original for the larger file changes the totals accordingly", afterKeeping.outputBytes === 90_174 + 670 + 1_000 && afterKeeping.grew === 0 && afterKeeping.keptOriginal === 2 && afterKeeping.converted === 1);
+  const empty = model.summarize([]);
+  check("an empty queue adds up to zero, without dividing by it", empty.done === 0 && empty.inputBytes === 0 && empty.savingsPercent === 0 && empty.savedBytes === 0);
+  const sum = model.summarize(Array.from({ length: 300 }, (_, index) => item(new File([new Uint8Array(1_000 + index)], `n-${index}.jpg`), { sizes: [500 + index] })));
+  check("300 files add up exactly", sum.done === 300 && sum.inputBytes === 300 * 1_000 + (299 * 300) / 2 && sum.outputBytes === 300 * 500 + (299 * 300) / 2 && sum.savedBytes === 150_000);
 }
 
-section("a download ID is given only for a stored, converted file");
+/* ------------------------------------------------------- stale results */
+section("a result knows which settings made it");
 {
-  const withStrayIds = responseOf([converted("first.png", RESULT_ID_A, ARTIFACT_A)], false); // says not stored, yet carries an ID
-  const contradictory = { ...responseOf([converted("first.png", RESULT_ID_A, ARTIFACT_A)], true), storage: FAILURE };
-  const flagOnly = { ...responseOf([converted("first.png", RESULT_ID_A, ARTIFACT_A)], false), storage: { persisted: true } };
-  const noReason = { ...responseOf([converted("first.png", RESULT_ID_A, null)], false), storage: undefined };
-  const missingId = responseOf([converted("first.png", RESULT_ID_A, null)], true);
-  check("stored response, stored file → its artifactId", storedArtifactId(storedBoth, storedBoth.results[0]) === ARTIFACT_A);
-  check("persisted: false wins over an artifactId in the result", storedArtifactId(withStrayIds, withStrayIds.results[0]) === null && describeImageOutcome(withStrayIds).kind === "converted_not_stored");
-  check("storage.persisted: false wins over persisted: true", storedArtifactId(contradictory, contradictory.results[0]) === null && describeImageOutcome(contradictory).kind === "converted_not_stored");
-  check("persisted: false wins over storage.persisted: true", storedArtifactId(flagOnly, flagOnly.results[0]) === null && describeImageOutcome(flagOnly).kind === "converted_not_stored");
-  check("a stored response without an artifactId for a file gives that file no download", storedArtifactId(missingId, missingId.results[0]) === null);
-  check("the per-response result id is never used as a download ID", storedArtifactId(notStoredBoth, notStoredBoth.results[0]) === null && notStoredBoth.results[0].id === RESULT_ID_A);
-  check("a rejected file never has a download", storedArtifactId(storedPartly, storedPartly.results[1]) === null && settleResult(storedPartly, storedPartly.results[1]).status === "failed");
-  check("a response without a reason still reads as not stored", describeImageOutcome(noReason).kind === "converted_not_stored" && describeImageOutcome(noReason).storageFailure?.message === "Storage is unavailable." && describeImageOutcome(noReason).storageFailure?.category === null);
-  for (const [name, response] of [["persisted: false with a stray ID", withStrayIds], ["contradictory flags", contradictory]]) {
-    check(`rendered markup for ${name} offers no download`, offersNoDownload(render(response)));
-  }
-}
-
-/* --------------------------------------------------------- 2. rendered panel */
-section("rendered: converted and stored");
-{
-  const view = render(storedBoth);
-  check("the banner says “Converted and stored” in the ok tone", view.noticeTone === "ok" && view.text.includes("Converted and stored") && view.text.includes("All 2 files were converted and stored."));
-  check("badges read Converted and Stored", />Converted<\/span>/.test(view.html) && />Stored<\/span>/.test(view.html) && !view.text.includes("Not stored"));
-  for (const id of [ARTIFACT_A, ARTIFACT_B]) {
-    check(`file ${id.slice(0, 8)}: the table and the card each link to the stored file's download`, view.hrefs.filter((href) => href === `/api/v1/artifacts/${id}?download=1`).length === 2);
-    check(`file ${id.slice(0, 8)}: the preview and the Inspect link use the same ID`, view.sources.some((source) => source.startsWith(`/api/v1/artifacts/${id}`)) && view.hrefs.includes(`/app/assets?inspect=${id}`));
-  }
-  check("every artifact link points at a stored file", view.hrefs.filter((href) => href.startsWith("/api/v1/artifacts/")).every((href) => href.includes(ARTIFACT_A) || href.includes(ARTIFACT_B)));
-  check("the ZIP download is offered", view.text.includes("Download all (ZIP)"));
-  check("the banner links to the job in History", view.hrefs.includes(`/app/history/${JOB}`) && view.text.includes("Open this job in History"));
-}
-
-section("rendered: converted but not stored");
-{
-  const view = render(notStoredBoth);
-  check("the banner says “Converted, but not stored” in the warn tone", view.noticeTone === "warn" && view.text.includes("Converted, but not stored"));
-  check("it says the files cannot be downloaded and the run is not in History", view.text.includes("2 files were converted, but the output could not be stored. They cannot be downloaded, and this run is not in History."));
-  check("it gives the server's reason, hint and category", view.text.includes(`Reason: ${FAILURE.message}`) && view.text.includes(FAILURE.hint) && view.text.includes(`Reference: ${FAILURE.category}`));
-  check("badges read Converted and Not stored", />Converted<\/span>/.test(view.html) && />Not stored<\/span>/.test(view.html));
-  check("no artifact URL, download attribute, ZIP button, Inspect link or History link is rendered", offersNoDownload(view), view.hrefs.join(" "));
-  check("no result ID of the response appears anywhere in the markup", !view.html.includes(RESULT_ID_A) && !view.html.includes(RESULT_ID_B));
-  check("each file says why it has no download", (view.text.match(/Not stored, so there is no file to download\./g) ?? []).length === 2 && (view.text.match(/No preview\. The converted file was not stored\./g) ?? []).length === 2);
-  check("the measurements are still shown", view.text.includes("first.png") && view.text.includes("second.png") && view.text.includes("Weight comparison"));
-  check("it does not claim anything was stored", !/converted and stored/i.test(view.text) && !view.text.includes("is in History") && !view.text.includes("can download") && !view.text.includes("can be downloaded"));
-}
-
-section("rendered: conversion failed");
-{
-  const view = render(failedStored);
-  check("the banner says “Conversion failed” in the danger tone", view.noticeTone === "danger" && view.text.includes("Conversion failed") && view.text.includes("The file could not be converted. No output was produced, so there is nothing to download."));
-  check("the rejected file is listed with its reason", view.text.includes("Rejected files") && view.text.includes("broken.png") && view.text.includes("This file is not a supported image."));
-  check("nothing is offered for download", offersNoDownload(view));
-  check("it is not presented as a storage problem", !view.text.includes("Converted, but not stored") && !view.text.includes("Reference:"));
-
-  const both = render(failedNotStored);
-  check("when storage also failed, the banner is still “Conversion failed”", both.noticeTone === "danger" && both.text.includes("Conversion failed") && !both.text.includes("Converted, but not stored"));
-  check("the storage failure is a secondary remark", both.text.includes(`This attempt was not recorded in History either. ${FAILURE.message}`) && offersNoDownload(both));
-}
-
-section("rendered: partly converted");
-{
-  const stored = render(storedPartly);
-  check("stored: warn tone, “1 of 2 files converted and stored”", stored.noticeTone === "warn" && stored.text.includes("1 of 2 files converted and stored") && />Partly converted<\/span>/.test(stored.html));
-  check("stored: only the converted file has links", stored.hrefs.some((href) => href.startsWith(`/api/v1/artifacts/${ARTIFACT_A}`)) && stored.text.includes("Rejected files") && !stored.text.includes("Download all"));
-  const notStored = render(notStoredPartly);
-  check("not stored: warn tone, “Converted, but not stored”, rejected file still listed", notStored.noticeTone === "warn" && notStored.text.includes("Converted, but not stored") && notStored.text.includes("1 file was converted, but the output could not be stored. It cannot be downloaded") && notStored.text.includes("Rejected files"));
-  check("not stored: nothing is offered for download", offersNoDownload(notStored));
-}
-
-section("a later run does not change what an earlier run stored");
-{
-  const earlier = itemsOf(responseOf([converted("earlier.png", RESULT_ID_A, ARTIFACT_A)], true));
-  const view = render(responseOf([converted("later.png", RESULT_ID_B, null)], false), itemsOf(responseOf([converted("later.png", RESULT_ID_B, null)], false), earlier));
-  check("the banner describes the latest run: not stored", view.noticeTone === "warn" && view.text.includes("Converted, but not stored"));
-  check("the earlier, stored file keeps its download", view.hrefs.some((href) => href.startsWith(`/api/v1/artifacts/${ARTIFACT_A}`)));
-  check("the later, unstored file has none", view.hrefs.filter((href) => href.startsWith("/api/v1/artifacts/")).every((href) => href.includes(ARTIFACT_A)) && view.text.includes("Not stored, so there is no file to download."));
-  check("no History link is shown for the unstored run", !view.html.includes("/app/history"));
-
-  const reverse = render(responseOf([converted("later.png", RESULT_ID_B, ARTIFACT_B)], true), itemsOf(responseOf([converted("later.png", RESULT_ID_B, ARTIFACT_B)], true), itemsOf(responseOf([converted("earlier.png", RESULT_ID_A, null)], false))));
-  check("an earlier, unstored file gets no download when a later run is stored", reverse.noticeTone === "ok" && reverse.hrefs.filter((href) => href.startsWith("/api/v1/artifacts/")).every((href) => href.includes(ARTIFACT_B)) && reverse.text.includes("Not stored, so there is no file to download.") && !reverse.text.includes("Download all"));
-}
-
-/* ------------------------------ 3. not stored, files sent with the response */
-const sentBoth = responseOf([sentBack("first.png", RESULT_ID_A, WEBP_A), sentBack("second.png", RESULT_ID_B, WEBP_B)], false);
-const sentOne = responseOf([sentBack("first.png", RESULT_ID_A, WEBP_A)], false);
-const sentPartly = responseOf([sentBack("first.png", RESULT_ID_A, WEBP_A), tooLarge("huge.png", RESULT_ID_B)], false);
-const sentWithRejected = responseOf([sentBack("first.png", RESULT_ID_A, WEBP_A), rejected("broken.png")], false);
-
-section("which files of a response can be saved from the tab");
-{
-  const result = sentBoth.results[0];
-  check("an unstored, converted file with its bytes in the response → that payload", inlineOutputOf(sentBoth, result) === result.inlineOutput && result.inlineOutput.bytes === WEBP_A.length);
-  const storedWithBytes = responseOf([{ ...converted("first.png", RESULT_ID_A, ARTIFACT_A), outputBytes: WEBP_A.length, inlineOutput: inlineOf(WEBP_A) }], true);
-  check("a stored response never uses bytes from the response", inlineOutputOf(storedWithBytes, storedWithBytes.results[0]) === null && describeImageOutcome(storedWithBytes).tabDownloads === 0 && storedArtifactId(storedWithBytes, storedWithBytes.results[0]) === ARTIFACT_A);
-  const variant = (change) => { const altered = { ...result, ...change }; return inlineOutputOf(responseOf([altered], false), altered); };
-  check("a payload whose size differs from the reported output size is not used", variant({ outputBytes: WEBP_A.length + 1 }) === null);
-  check("a truncated payload is not used", variant({ inlineOutput: { ...result.inlineOutput, data: result.inlineOutput.data.slice(0, -4) } }) === null);
-  check("an unknown encoding is not used", variant({ inlineOutput: { ...result.inlineOutput, encoding: "hex" } }) === null);
-  check("a rejected file has no payload", variant({ status: "failed" }) === null && inlineOutputOf(sentWithRejected, sentWithRejected.results[1]) === null);
-  check("a file that did not fit in the response has no payload", inlineOutputOf(sentPartly, sentPartly.results[1]) === null);
-
-  const local = createLocalOutput(result.inlineOutput, result.outputFilename);
-  check("the payload decodes to the exact file", local !== null && Buffer.from(await local.blob.arrayBuffer()).equals(WEBP_A) && local.bytes === WEBP_A.length && (await sharp(Buffer.from(await local.blob.arrayBuffer())).metadata()).format === "webp");
-  check("the copy is a blob: URL of the image type, saved under the output file name", local.url.startsWith("blob:") && local.blob.type === "image/webp" && local.filename === "first-optiweb.webp");
-  check("a payload that is not Base64 gives no copy", createLocalOutput({ ...result.inlineOutput, data: `${"!".repeat(result.inlineOutput.data.length)}` }, "x.webp") === null);
-  check("a payload shorter than it claims gives no copy", createLocalOutput({ ...result.inlineOutput, bytes: WEBP_A.length + 3 }, "x.webp") === null);
-  check("a type the pipeline does not produce is saved as plain bytes, never rendered", createLocalOutput(inlineOf(WEBP_A, "text/html"), "x.webp").blob.type === "application/octet-stream" && createLocalOutput(inlineOf(WEBP_A, "image/svg+xml"), "x.webp").blob.type === "application/octet-stream");
-}
-
-section("outcome: converted, not stored, files sent with the response");
-{
-  const both = describeImageOutcome(sentBoth);
-  check("still “Converted, but not stored” (warn), no stored downloads, no History entry", both.kind === "converted_not_stored" && both.tone === "warn" && both.title === "Converted, but not stored" && both.downloadsAvailable === false && both.historyJobId === null && both.storage.label === "Not stored");
-  check("both files are counted as downloadable from the tab", both.tabDownloads === 2);
-  check("the message says to download now and that the copies exist only in this tab", both.message === "2 files were converted, but the output could not be stored. Download them now: the copies exist only in this tab and are gone when you reload or leave the page. This run is not in History.", both.message);
-  check("one file: singular wording", describeImageOutcome(sentOne).message === "1 file was converted, but the output could not be stored. Download it now: the copy exists only in this tab and is gone when you reload or leave the page. This run is not in History.", describeImageOutcome(sentOne).message);
-  check("the toast says the files are kept only in this tab and gives the reason", both.toast.title === "Converted, but not stored" && both.toast.description === `Download the files now; they are kept only in this tab. ${FAILURE.message}` && describeImageOutcome(sentOne).toast.description === `Download the file now; it is kept only in this tab. ${FAILURE.message}`);
-  const partly = describeImageOutcome(sentPartly);
-  check("some files too large: says how many can be downloaded and why the others cannot", partly.tabDownloads === 1 && partly.message === "2 files were converted, but the output could not be stored. 1 of them can be downloaded now, from this tab only. The other is too large to send back without storage. This run is not in History." && partly.toast.description === `1 of 2 files can be downloaded now, from this tab only. ${FAILURE.message}`, partly.message);
-  const withRejected = describeImageOutcome(sentWithRejected);
-  check("a rejected file in the batch is still reported", withRejected.tabDownloads === 1 && withRejected.message.startsWith("1 file was converted, but the output could not be stored. Download it now:") && withRejected.message.endsWith("1 file could not be converted; the reasons are listed under Rejected files."));
-  check("no wording presents the copies as stored", [both, partly, withRejected, describeImageOutcome(sentOne)].every((outcome) => !/converted and stored|is in History|are stored/i.test(`${outcome.title} ${outcome.message} ${outcome.toast.title} ${outcome.toast.description}`)));
-}
-
-section("rendered: converted, not stored, files sent with the response");
-{
-  const items = itemsOf(sentBoth);
-  const view = render(sentBoth, items);
-  check("the banner is “Converted, but not stored” in the warn tone, with the reason, hint and category", view.noticeTone === "warn" && view.text.includes("Converted, but not stored") && view.text.includes(`Reason: ${FAILURE.message}`) && view.text.includes(FAILURE.hint) && view.text.includes(`Reference: ${FAILURE.category}`));
-  check("it says to download now and that the copies exist only in this tab", view.text.includes("Download them now: the copies exist only in this tab and are gone when you reload or leave the page. This run is not in History."));
-  check("badges read Converted and Not stored", />Converted<\/span>/.test(view.html) && />Not stored<\/span>/.test(view.html));
-  for (const [index, name] of [[0, "first-optiweb.webp"], [1, "second-optiweb.webp"]]) {
-    const url = items[index].localOutput.url;
-    check(`${name}: the table and the card each save the copy held in the tab, under the output file name`, url.startsWith("blob:") && view.downloads.filter((link) => link.href === url && link.name === name).length === 2, JSON.stringify(view.downloads));
-    check(`${name}: the preview shows the same copy`, view.sources.includes(url));
-  }
-  check("exactly four download links, all to blob: URLs", view.downloads.length === 4 && view.downloads.every((link) => link.href.startsWith("blob:")));
-  check("no artifact URL, Inspect link or History link is rendered", offersNothingStored(view) && !offersNoDownload(view), view.hrefs.join(" "));
-  check("each file says its copy is not stored", (view.text.match(/Not stored\. This copy is kept only in this tab\./g) ?? []).length === 2 && !view.text.includes("there is no file to download"));
-  check("the ZIP of the files in the tab is offered", (view.text.match(/Download all \(ZIP\)/g) ?? []).length === 1);
-  check("no result ID of the response appears anywhere in the markup", !view.html.includes(RESULT_ID_A) && !view.html.includes(RESULT_ID_B));
-  check("it does not claim anything was stored", !/converted and stored/i.test(view.text) && !view.text.includes("is in History") && !view.text.includes("Open this job in History"));
-
-  const partly = render(sentPartly);
-  check("a file too large to send back has no download and says why", partly.downloads.length === 2 && partly.downloads.every((link) => link.name === "first-optiweb.webp") && partly.text.includes("Not stored, and too large to send back with the results, so there is no file to download.") && offersNothingStored(partly) && !partly.text.includes("Download all"));
-
-  const strayBytes = responseOf([{ ...converted("first.png", RESULT_ID_A, ARTIFACT_A), outputBytes: WEBP_A.length, inlineOutput: inlineOf(WEBP_A) }], true);
-  const stored = render(strayBytes);
-  check("a stored file is always downloaded by URL, even if the response also carried bytes", stored.downloads.length === 2 && stored.downloads.every((link) => link.href === `/api/v1/artifacts/${ARTIFACT_A}?download=1`) && stored.sources.every((source) => !source.startsWith("blob:nodedata")));
-}
-
-section("stored and unstored runs in one queue");
-{
-  const earlier = itemsOf(sentOne);
-  const laterResponse = responseOf([converted("later.png", RESULT_ID_B, ARTIFACT_B)], true);
-  const view = render(laterResponse, itemsOf(laterResponse, earlier));
-  check("an earlier, unstored file keeps the copy in the tab when a later run is stored", view.noticeTone === "ok" && view.downloads.filter((link) => link.href === earlier[0].localOutput.url).length === 2 && view.downloads.filter((link) => link.href === `/api/v1/artifacts/${ARTIFACT_B}?download=1`).length === 2);
-  check("the unstored file has no Inspect link and no artifact URL of its own", view.hrefs.filter((href) => href.startsWith("/app/assets?inspect=")).length === 1 && view.hrefs.filter((href) => href.startsWith("/api/v1/artifacts/")).every((href) => href.includes(ARTIFACT_B)));
-
-  const storedPair = responseOf([converted("s1.png", RESULT_ID_A, ARTIFACT_A), converted("s2.png", RESULT_ID_B, ARTIFACT_B)], true);
-  const both = render(storedPair, itemsOf(storedPair, itemsOf(sentBoth)));
-  check("two of each kind: one ZIP button per kind, named for what it bundles", both.text.includes("Download stored files (ZIP)") && both.text.includes("Download unstored files (ZIP)") && !both.text.includes("Download all (ZIP)"));
-}
-
-section("ZIP of the files held in the tab");
-{
-  const outputs = [createLocalOutput(inlineOf(WEBP_A), "first-optiweb.webp"), createLocalOutput(inlineOf(WEBP_B), "second-optiweb.webp"), createLocalOutput(inlineOf(WEBP_B), "first-optiweb.webp")];
-  const bundle = await zipLocalOutputs(outputs);
-  const zip = await JSZip.loadAsync(Buffer.from(await bundle.arrayBuffer()));
-  const names = Object.keys(zip.files).sort();
-  check("every file is in the bundle; a repeated name gets a suffix", bundle.type === "application/zip" && JSON.stringify(names) === JSON.stringify(["first-optiweb-2.webp", "first-optiweb.webp", "second-optiweb.webp"]), names.join(", "));
-  const entry = async (name) => Buffer.from(await zip.file(name).async("uint8array"));
-  check("each entry holds the exact bytes of its file", (await entry("first-optiweb.webp")).equals(WEBP_A) && (await entry("second-optiweb.webp")).equals(WEBP_B) && (await entry("first-optiweb-2.webp")).equals(WEBP_B));
-}
-
-/* ----------------------------------- 4. an API path that does not answer JSON */
-section("wording when an API path answers with something other than JSON");
-{
-  const missing = describeNonJsonResponse(404, null);
-  check("HTTP 404: says the API is not available on this site, and why", missing.code === "api_unavailable" && missing.message === "The API is not available on this site (HTTP 404)." && missing.hint.includes("without its server function") && missing.hint.includes("put the latest deployment into production"));
-  check("HTTP 404: does not send the reader to support for a deployment problem", !/support/i.test(`${missing.message} ${missing.hint}`));
-  const other = describeNonJsonResponse(502, null);
-  check("any other status keeps the generic wording", other.code === "bad_response" && other.message === "The API returned a non-JSON response (HTTP 502)." && other.hint.includes("Retry once"));
-  check("a request ID, when the host sent one, is given as the reference", describeNonJsonResponse(500, "req-123").hint.includes("Reference req-123"));
-}
-
-/* ------------------------------------------------- 5. the other tools' notice */
-section("storage notice used by the CSS, asset and audit tools");
-{
-  const notice = (props) => renderToStaticMarkup(createElement(StorageNotice, { title: "Patched, but not stored", ...props }, "The patched CSS is complete."));
-  check("renders nothing when the result was stored", notice({ persisted: true, storage: { persisted: true } }) === "" && notice({ persisted: true, storage: undefined }) === "");
-  const failed = notice({ persisted: false, storage: FAILURE });
-  check("not stored: warn notice with the server's reason, hint and category", failed.includes('data-tone="warn"') && failed.includes("Patched, but not stored") && failed.includes(`Reason: ${FAILURE.message}`) && failed.includes(FAILURE.hint) && failed.includes(FAILURE.category));
-  const unexplained = notice({ persisted: false, storage: undefined });
-  check("not stored without a reason: still shown, with generic wording", unexplained.includes('data-tone="warn"') && unexplained.includes("Reason: Storage is unavailable."));
-  check("a contradictory response is shown as not stored", notice({ persisted: true, storage: FAILURE }).includes('data-tone="warn"'));
+  const key = model.settingsKey;
+  check("in single mode, changing the format, quality or a size limit makes a result out of date", new Set([key(settings), key({ ...settings, format: "avif" }), key({ ...settings, quality: 60 }), key({ ...settings, maxWidth: 1_200 }), key({ ...settings, maxHeight: 800 })]).size === 5);
+  check("in a comparison, the format control has no effect, so changing it does not", key({ ...settings, strategy: "best-effort", format: "webp" }) === key({ ...settings, strategy: "best-effort", format: "png" }));
+  check("changing the strategy does", new Set([key(settings), key({ ...settings, strategy: "best-effort" }), key({ ...settings, strategy: "no-regression" })]).size === 3);
+  const done = item(photo, { sizes: [100] });
+  check("a finished file is not processed again with the same settings", model.isPending(done, key(settings)) === false);
+  check("it is processed again after a setting changed", model.isPending(done, key({ ...settings, quality: 50 })) === true);
+  check("ready, failed and cancelled files are processed by the next run", ["ready", "failed", "cancelled"].every((status) => model.isPending(item(photo, { status }), key(settings)) === true));
+  check("refused files and files still being checked are not", ["rejected", "checking"].every((status) => model.isPending(item(photo, { status }), key(settings)) === false));
+  check("files already in work are not queued twice", ["queued", "processing"].every((status) => model.isPending(item(photo, { status }), key(settings)) === false));
 }
 
 const ok = report();
-if (ok) console.log("\nAll outcome checks passed.");
+if (ok) console.log("\nAll result-model checks passed.");
 process.exit(ok ? 0 : 1);

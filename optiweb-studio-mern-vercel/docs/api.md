@@ -1,149 +1,172 @@
-# OptiWeb Studio — API reference
+# Unikit Studio: API
 
-Base: `/api/v1`. Guest session is issued automatically via the `ow_sid` httpOnly cookie; all
-records are scoped to it.
+The server is small on purpose. It does the one thing a browser may not do,
+which is to read another site's pages for the Website Audit. It accepts no
+file, sets no cookie, has no session and stores nothing.
 
-**Envelope**
+The source is one file, `src/app.ts`. `npm run test:api` checks every statement
+on this page against the running server.
 
-```jsonc
-// success
-{ "ok": true, "data": T, "meta": { "requestId": string, "rateLimit": { "limit": n, "remaining": n } } }
-// failure
-{ "ok": false, "error": { "code": string, "message": string, "hint"?: string, "details"?: unknown }, "meta": { "requestId": string } }
+## Routes
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/health` | Liveness for uptime monitors. Plain JSON, no envelope. |
+| `GET /api/v1/health` | The same facts in the standard envelope. |
+| `POST /api/v1/audits` | Audit a public page. JSON in, JSON out. |
+
+Everything else under `/api` is refused:
+
+| Request | Answer |
+| --- | --- |
+| Another method on a route above | `405 method_not_allowed`, with an `Allow` header |
+| An endpoint of an earlier version: `/api/v1/images`, `assets`, `css`, `jobs`, `uploads`, `artifacts`, `history`, `usage`, `preferences`, `session`, `limits`, `internal` | `410 gone`. The request body is not read. |
+| Any other path under `/api` | `404 not_found` |
+| A method other than `GET` or `HEAD` on a page address | `405 method_not_allowed` |
+
+## Envelope
+
+Success:
+
+```json
+{ "ok": true, "data": { }, "meta": { "requestId": "3cb1d0be-…" } }
 ```
 
-**Error codes**
+Failure:
 
-| Code | HTTP | Meaning |
-| --- | --- | --- |
-| `bad_request` | 400 | Malformed request body or missing files |
-| `validation_error` | 422 | zod schema violation (field-level `details`) |
-| `payload_too_large` | 413 | File above the size limit |
-| `too_many_files` | 413 | More files than the batch limit |
-| `unsupported_media_type` | 415 | Decoder rejected the content (corrupt/SVG, etc.) |
-| `rate_limited` | 429 | `Retry-After` header present |
-| `not_found` | 404 | Resource absent or owned by another session |
-| `unprocessable_entity` | 422 | Transform failed (timeout, encoder) |
-| `storage_unavailable` | 503 | Database unreachable where required |
-
----
-
-### GET /api/v1/health
-
-Probes the database and sharp. Always answers HTTP 200; `data.ok` is true only when the database is ready for reads and writes (`data.database.ready`). When it is not, `data.database.category` names the cause.
-
-### POST /api/v1/images/optimize (also /images/optimize/batch)
-
-`multipart/form-data`
-
-| Field | Type | Notes |
-| --- | --- | --- |
-| `files` | file[] | 1–8 images; JPEG/PNG/WebP/AVIF/GIF/TIFF ≤ 10 MB each |
-| `format` | string | `webp` (default) · `avif` · `jpeg` · `png` · `original` |
-| `quality` | int | 30–100 (default 78) |
-| `maxWidth` / `maxHeight` | int? | 16–8000; scaled down only, aspect preserved |
-
-Response `data`:
-
-```jsonc
+```json
 {
-  "jobId": string,           // History ID; empty when nothing was stored
-  "status": "completed | partial | failed",   // the conversion
-  "persisted": boolean,      // same value as storage.persisted
-  "storage": { "persisted": true } | { "persisted": false, "category": string, "message": string, "hint": string },
-  "results": [{
-    "id": string,            // identifies the result in this response; not a download ID
-    "artifactId": string | null,   // stored output file, served by GET /api/v1/artifacts/:id
-    "inlineOutput"?: { "encoding": "base64", "contentType": string, "bytes": 0, "data": string } | null,
-    "inlineSkipped"?: "too_large",
-    "filename": string,      // safe original name
-    "status": "completed | failed",
-    "inputBytes": 0, "outputBytes": 0, "savedBytes": 0, "savingsPercent": 0,
-    "inputWidth": 0, "inputHeight": 0, "outputWidth": 0, "outputHeight": 0,
-    "outputFormat": "webp", "durationMs": 0,
-    "errorCode"?: string, "message"?: string   // failed files only
-  }],
-  "totals": { "inputBytes": 0, "outputBytes": 0, "savedBytes": 0, "savingsPercent": 0 }
+  "ok": false,
+  "error": { "code": "validation_error", "message": "…", "hint": "…", "details": [] },
+  "meta": { "requestId": "3cb1d0be-…" }
 }
 ```
 
-Per-file failures never abort the batch; `status: "partial"` summarises them.
+`hint` and `details` are present when there is something to add. Every answer
+carries `X-Request-Id` with the same value as `meta.requestId`. A plain request
+ID sent in `X-Request-Id` is kept, so one ID can follow a request through logs;
+anything else is replaced by a new UUID. API answers are sent with
+`Cache-Control: no-store`.
 
-A converted file has exactly one of two downloads. When the job was stored (`persisted: true`), `artifactId` names the stored file. When it was not, `artifactId` is null and `inlineOutput` holds the file itself, Base64-encoded, with `bytes` equal to `outputBytes`; the server keeps no copy. One response carries at most 3 MB of such files (`OW_MAX_INLINE_MB` can lower this). A file beyond that has `inlineOutput: null` and `inlineSkipped: "too_large"`. See "Storage diagnostics" in `deployment.md` for the `storage` categories.
+Error messages never contain the request body, a stack trace, a file path or an
+internal address.
 
-### Direct uploads and background jobs
+## Health
 
-Available when `GET /api/v1/limits` reports `image.mode: "direct"`. Otherwise these endpoints answer 503 `direct_uploads_unavailable`. Every endpoint acts on the session in the request's cookie only; an ID that belongs to another session answers 404.
+```
+GET /api/v1/health
+```
 
-| Endpoint | Purpose | Success |
+```json
+{
+  "ok": true,
+  "data": {
+    "ok": true,
+    "service": "Unikit Studio",
+    "version": "2.0.0",
+    "processing": { "images": "browser", "stylesheets": "browser", "assets": "browser", "audit": "server" },
+    "acceptsFileUploads": false,
+    "storesFiles": false,
+    "usesCookies": false,
+    "audit": { "maxPages": 3, "maxResourcesPerPage": 25, "pagespeedConfigured": false },
+    "uptimeSeconds": 12,
+    "timestamp": "2026-11-20T07:22:29.278Z"
+  },
+  "meta": { "requestId": "…" }
+}
+```
+
+Nothing in it depends on an outside service, so it answers whenever the
+function runs. `GET /api/health` returns the `data` object alone.
+
+## Website audit
+
+```
+POST /api/v1/audits
+Content-Type: application/json
+
+{ "url": "https://example.com/", "extraPages": 0 }
+```
+
+| Field | Type | Meaning |
 | --- | --- | --- |
-| `POST /api/v1/jobs/image-optimization` | Admit a job. Body: `{ files: [{ name, type, size }], settings?, idempotencyKey? }`. Checks count, sizes, types, quota and job slots; reserves the storage. Nothing is uploaded yet. | 201, or 200 with `replayed: true` when the idempotency key (body, or `Idempotency-Key` header) was used before |
-| `POST /api/v1/uploads/token` | Body `{ uploadId }` (an item ID of the job). Returns what the browser needs to upload that one file to storage: a client token bound to a server-generated path, the declared size and content type, valid for 20 minutes. Can be requested again to retry an upload. | 200 |
-| `POST /api/v1/uploads/complete` | Body `{ uploadId }`. The server looks the object up in storage, compares its size with the declared size and checks its file signature; a file that fails is deleted. Repeating the call changes nothing. | 202 when this confirmation queued the job, else 200 |
-| `DELETE /api/v1/uploads/:id` | Remove a file from a job that is still uploading. | 200 |
-| `GET /api/v1/jobs/:id` | The job: `state`, real counts (`awaitingUpload`, `waiting`, `processing`, `completed`, `failed`, `cancelled`), totals over converted files, and each file with its result or error. No percentage is reported. | 200 |
-| `POST /api/v1/jobs/:id/cancel` | Stop the job. A job that no worker holds is cancelled at once; otherwise the worker stops after the file in progress. Converted files stay available. | 200 |
-| `POST /api/v1/jobs/:id/retry` | Run the failed files again whose failure was temporary and whose source is still stored. | 202 |
-| `GET /api/v1/artifacts/:id/status` | `available` or `expired`, with size and expiry, without downloading. | 200 |
-| `GET /api/v1/artifacts/zip?ids=a,b,c` | The same ZIP as the POST form, as a plain link; streamed. | 200 |
-| `GET /api/v1/usage` | The session's storage use, quota, jobs in progress, files expiring soon, recent jobs, retention periods. | 200 |
+| `url` | string, 8 to 2,048 characters | The page to audit. `http` or `https`, a public host, no user name or password. |
+| `extraPages` | integer 0 to 2, default 0 | Further pages to inspect: the first links on the page that stay on the same site. |
 
-Job states: `created` → `uploading` → `uploaded` → `queued` → `processing` → `completed` | `partial` | `failed`, and `cancelled` from any state before the end.
+The answer is a report: the document, every resource the HTML names (images,
+stylesheets, fonts, scripts) with its status, type and transferred bytes,
+totals, findings, and a `coverage` section that states what was and was not
+looked at. `coverage.javascriptRendered` is always `false`: the audit reads
+HTML and does not run scripts. Lighthouse and Chrome field data appear only
+when `PAGESPEED_API_KEY` is set; otherwise the report says they are
+unavailable. The report is returned and not kept.
 
-Errors use the common envelope. Codes specific to this pipeline: 403 `quota_exceeded`, 409 `conflict` (for example, confirming a file that has not arrived), 413 `payload_too_large` and `too_many_files`, 415 `unsupported_media_type`, 429 `too_many_active_jobs` and `rate_limited`, 503 `capacity_exhausted`, `direct_uploads_unavailable` and `storage_unavailable`.
+### What the audit refuses
 
-`GET /api/v1/artifacts/:id` serves a file from object storage as a stream, with `Content-Length`, to the session that owns it. `GET /api/v1/limits` carries `image` (the limits of the mode in effect) and `advancedCapacity`.
+| Condition | Answer |
+| --- | --- |
+| `Content-Type` is not `application/json` (a form or a file upload, for example) | `415 unsupported_media_type` |
+| Body larger than 16 KB | `413 payload_too_large` |
+| Body is not valid JSON | `400 bad_request` |
+| Body is not an object, or a field is missing or out of range | `422 validation_error`, with `details[].path` (a bare JSON string is refused with `400`) |
+| The URL is not `http(s)`, carries credentials, names a private address, or its host does not resolve | `400 bad_request` |
+| The host cannot be reached, answers too slowly, or sends more than the size limit | `422 unprocessable_entity` |
+| More than 10 audits a minute from one address | `429 rate_limited`, with `Retry-After` |
 
-### POST /api/v1/css/analyze
+### Which addresses are private
 
-Body `{ "css": string }` (≤ 400k chars). Returns counts of `@font-face` rules, how many declare
-`font-display`, how many are malformed, and findings with line numbers. Read-only.
+The audit fetches only public internet addresses. Refused, for the requested
+URL and again for every redirect and every resource:
 
-### POST /api/v1/css/patch-font-display
+- loopback (`127.0.0.0/8`, `::1`), private ranges (`10/8`, `172.16/12`,
+  `192.168/16`, `fc00::/7`), link-local (`169.254/16`, which includes cloud
+  metadata at `169.254.169.254`, and `fe80::/10`), carrier-grade NAT
+  (`100.64/10`), multicast, reserved and documentation ranges;
+- IPv6 forms that carry an IPv4 address: IPv4-mapped (also written in hex),
+  NAT64 and 6to4;
+- host names that resolve to any of the above. The check is repeated at the
+  moment a connection is opened, on the addresses that connection will use, so
+  a name cannot pass the check and then resolve to something else. A name with
+  both public and private addresses is refused.
 
-Body `{ "css": string, "policy": "auto | block | swap | fallback | optional" }`.
+### Limits of one audit
 
-Returns the patched stylesheet (`output`), `changedLines` (line numbers inserted),
-`rulesPatched`, byte counts, the same analysis, and `artifactId` (stored copy) when persistence
-is available. Malformed CSS is returned unchanged with `analysis.parseErrors` populated.
+| Limit | Default | Environment variable (ceiling) |
+| --- | --- | --- |
+| Pages, the requested one included | 3 | `UNIKIT_AUDIT_MAX_PAGES` (3) |
+| Resources fetched per page | 25 | `UNIKIT_AUDIT_MAX_RESOURCES` (25) |
+| Largest page document read | 1 MB | `UNIKIT_AUDIT_MAX_HTML_MB` (1) |
+| Largest resource read | 1 MB | `UNIKIT_AUDIT_MAX_RESOURCE_MB` (1) |
+| Bytes read in total | 24 MB | `UNIKIT_AUDIT_MAX_TOTAL_MB` (48) |
+| Time per request | 4 s | `UNIKIT_AUDIT_TIMEOUT_MS` (8,000) |
+| Time for the whole audit | 45 s | `UNIKIT_AUDIT_TOTAL_TIMEOUT_MS` (120,000) |
+| Time kept for PageSpeed Insights | 10 s | `UNIKIT_AUDIT_PAGESPEED_TIMEOUT_MS` (12,000) |
 
-### POST /api/v1/assets/analyze
+A limit that cuts an audit short is named in `coverage.stoppedBy`. A value
+above its ceiling is ignored. Keep the whole-audit time below the host's
+function limit (60 seconds as configured for Vercel).
 
-`multipart/form-data`: `files` (images and/or `.css`, ≤ 8) and optional `thresholdKb` (50–10000,
-default from the session's preferences). Returns per-file metadata (true dimensions for images),
-findings with `evidence` / `recommendation`, and a `heuristic` flag.
+The rate limit is counted in the memory of one server instance. On a
+serverless host each instance counts separately, so it slows a single client
+down but is not a hard quota.
 
-### GET /api/v1/history
+## Response headers
 
-Query: `q`, `kind` (`image.optimize | css.font-display | asset.analyze`), `status`, `sort`
-(`newest | oldest | saved`), `page`, `pageSize` (5–50). Returns paginated entries plus a
-`summary` aggregate for the session.
+Every response, from the server and from the static hosts, carries:
 
-### GET /api/v1/history/:id · DELETE /api/v1/history/:id
+| Header | Value |
+| --- | --- |
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `X-Frame-Options` | `DENY` |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), payment=(), usb=()` |
+| `Cross-Origin-Opener-Policy` | `same-origin` |
 
-Detail returns the job header and per-file rows (`hasArtifact` flags downloadable files).
-DELETE removes the job and cascades its items/artifacts.
+`'wasm-unsafe-eval'` allows WebAssembly, which the AVIF encoder needs; it does
+not allow `eval`. `blob:` and `data:` in `img-src` are for previews of results
+that exist only in the tab.
 
-### DELETE /api/v1/history
-
-Clears the whole session (records + artifacts).
-
-### GET /api/v1/artifacts/:id
-
-Streams a stored result (`image/*` or `text/css`). `?inline=1` serves it for `<img>` previews.
-Content-Disposition is set from the stored (server-generated) filename.
-
-### POST /api/v1/artifacts/zip
-
-Body `{ "ids": string[], "name"?: string }`. Returns a DEFLATE ZIP with an
-`optiweb-manifest.txt` documenting each file's measured byte length. Only ids owned by the
-caller's session are bundled.
-
-### GET /api/v1/preferences · PUT /api/v1/preferences
-
-Session defaults: `defaultImageFormat`, `defaultQuality` (30–100), `defaultMaxWidth`,
-`fontDisplayPolicy`, `analyzerThresholdKb` (50–10000), `reduceMotion`.
-
-### GET /api/v1/session
-
-Resolves (and issues) the guest session; returns the id, a short display code and mode.
+The values are defined once, in `src/server/config/securityHeaders.ts`.
+`vercel.json` and `netlify.toml` repeat them for the static files, and
+`npm run test:security` fails when the three differ.

@@ -9,13 +9,15 @@
  * how many resources per page, that nothing is requested twice, and that the
  * limits on bytes, time and parallel requests hold.
  *
+ * Image sizes in the report come from the same header parser the browser
+ * uses (`src/shared/imageHeader.ts`): the server decodes no image either.
+ *
  * The real network layer, which refuses private and reserved addresses and
  * re-checks every redirect, is not replaced in production and is not what
- * this test covers; `test:security` and the API self-test probe it.
+ * this test covers; `test:security` and `test:api` probe it.
  */
 import { setTimeout as sleep } from "node:timers/promises";
-import sharp from "sharp";
-import { createChecker } from "./lib/selftest-kit.mjs";
+import { createChecker, fixture, solidPng } from "./lib/selftest-kit.mjs";
 
 delete process.env.PAGESPEED_API_KEY;
 
@@ -40,7 +42,7 @@ async function withBudgets({ bytes = defaults.bytes, time = defaults.time }, tas
 }
 
 const ORIGIN = "https://site.example";
-const png = await sharp({ create: { width: 20, height: 10, channels: 3, background: { r: 1, g: 2, b: 3 } } }).png().toBuffer();
+const png = solidPng(20, 10, [1, 2, 3]);
 const html = (title, body) => Buffer.from(`<!doctype html><html><head><title>${title}</title></head><body>${body}</body></html>`);
 
 /** A made-up site and a network layer that serves it, records every request and counts requests in flight. */
@@ -169,6 +171,25 @@ section("limits: resources per page, bytes per resource, bytes in total, request
 {
   const failure = await audit(fakeSite({ [`${ORIGIN}/`]: { status: 503, body: Buffer.from("down") } }), `${ORIGIN}/`, 2).then(() => null, (error) => error);
   check("the requested page failing fails the audit, with the status in the message", failure?.message === "The page returned HTTP 503." && failure.status === 422, String(failure?.message));
+}
+
+/* ---------------------------------------------------------- image facts */
+section("images: sizes and traits are read from file headers, without decoding");
+{
+  const rotated = fixture("rotated-gps-240x160.jpg");
+  const animated = fixture("animated-3f-60x40.gif");
+  const site = fakeSite({
+    [`${ORIGIN}/`]: { body: html("Images", '<img src="/rotated.jpg"><img src="/anim.gif"><img src="/fake.png"><img src="/cut.png">') },
+    [`${ORIGIN}/rotated.jpg`]: { type: "image/jpeg", body: rotated },
+    [`${ORIGIN}/anim.gif`]: { type: "image/gif", body: animated },
+    [`${ORIGIN}/fake.png`]: { type: "image/png", body: Buffer.from("<html>this is not a PNG</html>") },
+    [`${ORIGIN}/cut.png`]: { type: "image/png", body: png.subarray(0, 12) },
+  });
+  const result = await audit(site, `${ORIGIN}/`, 0);
+  const row = (suffix) => result.resources.find((entry) => entry.url.endsWith(suffix));
+  check("a rotated JPEG is reported with the size it is displayed at", row("/rotated.jpg")?.width === 160 && row("/rotated.jpg")?.height === 240, JSON.stringify(row("/rotated.jpg")));
+  check("a GIF's size comes from its header", row("/anim.gif")?.width === 60 && row("/anim.gif")?.height === 40, JSON.stringify(row("/anim.gif")));
+  check("a response that is not an image, or is cut off, has no size and does not fail the audit", row("/fake.png")?.width == null && row("/cut.png")?.width == null && row("/fake.png")?.status === 200, JSON.stringify([row("/fake.png"), row("/cut.png")]));
 }
 
 const ok = report();

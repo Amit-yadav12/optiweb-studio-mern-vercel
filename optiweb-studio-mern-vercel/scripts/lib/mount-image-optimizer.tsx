@@ -1,19 +1,22 @@
 /**
  * Mounts the real Image Optimizer screen, with the providers it needs, into a
- * container. The DOM self-tests load this file through Vite, so the screen,
+ * container. The DOM self-test loads this file through Vite, so the screen,
  * the router and React all come from one module graph.
+ *
+ * The screen is the app's own. Only the engine is the test's: it stands in for
+ * the browser's decoder and encoders, which jsdom does not have.
  */
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { ToastProvider } from "@/components/ui/Feedback";
-import { ImageOptimizer, type OptimizerLimits, type OptimizerTransport } from "@/features/images/ImageOptimizer";
+import { ImageOptimizer, type ImageOptimizerProps } from "@/features/images/ImageOptimizer";
 
-export function mountImageOptimizer(container: HTMLElement, limits: OptimizerLimits, transport?: OptimizerTransport): Root {
+export function mountImageOptimizer(container: HTMLElement, props: ImageOptimizerProps): Root {
   const root = createRoot(container);
   root.render(
     <MemoryRouter>
       <ToastProvider>
-        <ImageOptimizer limits={limits} transport={transport} />
+        <ImageOptimizer {...props} />
       </ToastProvider>
     </MemoryRouter>,
   );

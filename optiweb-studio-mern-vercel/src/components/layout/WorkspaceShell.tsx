@@ -1,12 +1,10 @@
 import { Link, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { Gauge, Globe, History, ImageDown, Menu, ScanSearch, Settings2, Type, X, HardDrive } from "lucide-react";
-import { ProductMark } from "@/components/brand/ProductMark";
+import { Gauge, Globe, ImageDown, Menu, ScanSearch, Settings2, Type, X } from "lucide-react";
+import { Wordmark } from "@/components/brand/ProductMark";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
-import { api } from "@/lib/api-client";
-
-/** Survives WorkspaceShell remounts so reduce-motion does not flash off on navigation. */
-let cachedReduceMotion: boolean | null = null;
+import { usePreferences } from "@/lib/preferences";
+import { REDUCE_MOTION_CLASS } from "@/lib/storage-keys";
 
 const NAV_GROUPS: Array<{
   label: string;
@@ -15,20 +13,16 @@ const NAV_GROUPS: Array<{
   {
     label: "Workspace",
     items: [
-      { href: "/app", label: "Overview", icon: Gauge, hint: "Session summary and next actions" },
+      { href: "/app", label: "Overview", icon: Gauge, hint: "The tools, and how your files are handled" },
       { href: "/app/images", label: "Image Optimizer", icon: ImageDown, hint: "Convert and compress images" },
       { href: "/app/fonts", label: "Font Optimizer", icon: Type, hint: "Audit and patch font-display" },
-      { href: "/app/assets", label: "Asset Analyzer", icon: ScanSearch, hint: "Inspect uploaded assets" },
-      { href: "/app/audit", label: "Website Audit", icon: Globe, hint: "Fetch a public page and inspect its assets" },
+      { href: "/app/assets", label: "Asset Analyzer", icon: ScanSearch, hint: "Inspect files on this device" },
+      { href: "/app/audit", label: "Website Audit", icon: Globe, hint: "Inspect a public page and its assets" },
     ],
   },
   {
-    label: "Records",
-    items: [
-      { href: "/app/history", label: "History", icon: History, hint: "Previous jobs in this session" },
-      { href: "/app/usage", label: "Storage", icon: HardDrive, hint: "Quota, stored files and retention" },
-      { href: "/app/settings", label: "Settings", icon: Settings2, hint: "Defaults and data retention" },
-    ],
+    label: "Preferences",
+    items: [{ href: "/app/settings", label: "Settings", icon: Settings2, hint: "Defaults, kept in this browser" }],
   },
 ];
 
@@ -74,12 +68,8 @@ function NavList({ onNavigate }: { onNavigate?: () => void }) {
 
 function Brand() {
   return (
-    <Link to="/" className="flex items-center gap-2.5 rounded-md px-1 py-1">
-      <ProductMark size={26} />
-      <span className="flex flex-col leading-none">
-        <span className="text-sm font-semibold tracking-[-0.01em] text-ink">OptiWeb Studio</span>
-        <span className="mt-1 font-mono text-2xs tracking-[0.1em] text-muted uppercase">Make every byte count</span>
-      </span>
+    <Link to="/" className="flex items-center rounded-md px-1 py-1" aria-label="Unikit Studio home">
+      <Wordmark />
     </Link>
   );
 }
@@ -97,27 +87,15 @@ export function WorkspaceShell({
 }) {
   const [open, setOpen] = useState(false);
 
-  // The session can minimise motion beyond the OS-level setting.
-  // Cached at module scope so navigating between workspace pages does not
-  // flash the class off (the previous cleanup used to remove it on unmount).
   useEffect(() => {
-    let cancelled = false;
-    if (cachedReduceMotion !== null) {
-      document.documentElement.classList.toggle("ow-reduce-motion", cachedReduceMotion);
-    }
-    api
-      .get<{ reduceMotion: boolean }>("/api/v1/preferences")
-      .then((prefs) => {
-        cachedReduceMotion = prefs.reduceMotion;
-        if (!cancelled) document.documentElement.classList.toggle("ow-reduce-motion", prefs.reduceMotion);
-      })
-      .catch(() => {
-        /* storage offline: OS preference still applies */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    document.title = `${title} · Unikit Studio`;
+  }, [title]);
+
+  // "Reduce motion" from Settings turns animations off beyond the system-wide setting.
+  const { reduceMotion } = usePreferences();
+  useEffect(() => {
+    document.documentElement.classList.toggle(REDUCE_MOTION_CLASS, reduceMotion);
+  }, [reduceMotion]);
 
   useEffect(() => {
     if (!open) return;
@@ -142,9 +120,9 @@ export function WorkspaceShell({
         </div>
         <div className="border-t border-line pt-4">
           <p className="font-mono text-2xs leading-relaxed text-muted">
-            v1.1 · MERN workspace
+            v2.0 · runs in your browser
             <br />
-            history: this browser session
+            no uploads · no cookies
           </p>
         </div>
       </aside>
@@ -162,7 +140,7 @@ export function WorkspaceShell({
                 aria-label="Close navigation"
                 className="grid size-9 place-items-center rounded-md text-muted hover:bg-surface-sunken hover:text-ink"
               >
-                <X className="size-4" />
+                <X className="size-4" aria-hidden />
               </button>
             </div>
             <NavList onNavigate={() => setOpen(false)} />
@@ -184,7 +162,7 @@ export function WorkspaceShell({
               aria-expanded={open}
               className="grid size-9 shrink-0 place-items-center rounded-md border border-line-strong bg-surface text-ink-soft lg:hidden"
             >
-              <Menu className="size-4" />
+              <Menu className="size-4" aria-hidden />
             </button>
             <div className="min-w-0 flex-1">
               <span className="block truncate text-sm font-semibold tracking-[-0.01em] text-ink">{title}</span>

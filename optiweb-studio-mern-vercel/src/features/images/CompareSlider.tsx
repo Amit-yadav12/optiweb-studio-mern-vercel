@@ -60,7 +60,7 @@ export function CompareSlider({
           style={{ left: `${position}%` }}
           aria-hidden
         >
-          <MoveHorizontal className="size-3.5" />
+          <MoveHorizontal className="size-3.5" aria-hidden />
         </span>
         <span className="absolute top-2 left-2 rounded bg-navy/75 px-1.5 py-0.5 font-mono text-2xs tracking-wide text-white/85 uppercase">
           original

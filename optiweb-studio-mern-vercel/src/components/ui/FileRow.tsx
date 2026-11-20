@@ -1,58 +1,48 @@
-import { FileWarning, RotateCcw, X } from "lucide-react";
-import { StatusBadge } from "@/components/ui/Feedback";
-import { statusToneFor } from "@/lib/status";
+import { FileWarning, X } from "lucide-react";
+import { StatusBadge, type Tone } from "@/components/ui/Feedback";
 import { IconButton } from "@/components/ui/Button";
-import { formatBytes } from "@/lib/format";
-
-export type FileRowStatus = "ready" | "uploading" | "processing" | "completed" | "failed";
 
 /**
- * One queued or processed file. Status is always spelled out — the badge tone is
- * never the only signal.
+ * One file in a queue. The status is always spelled out in words: the badge
+ * colour is never the only signal.
  */
 export function FileRow({
   name,
   status,
+  tone,
   detail,
-  saved,
+  note,
   error,
+  hint,
   onRemove,
-  onRetry,
-  thumbnail,
 }: {
   name: string;
-  status: FileRowStatus;
+  /** Status in words, shown in the badge. */
+  status: string;
+  tone: Tone;
+  /** Facts about the file: format, size, dimensions. */
   detail: string;
-  saved?: { bytes: number; percent: number } | null;
+  /** What is happening to the file right now, or its result. */
+  note?: string | null;
   error?: string | null;
+  hint?: string | null;
   onRemove?: () => void;
-  onRetry?: () => void;
-  thumbnail?: string | null;
 }) {
   return (
-    <li className="flex items-center gap-3 border-b border-line px-3 py-2.5 last:border-b-0">
-      <span className="grid size-9 shrink-0 place-items-center overflow-hidden rounded border border-line bg-surface-sunken">
-        {thumbnail ? (
-          <img src={thumbnail} alt="" className="size-full object-cover" loading="lazy" />
-        ) : (
-          <span className="font-mono text-2xs text-muted">{extOf(name)}</span>
-        )}
+    <li className="flex items-start gap-3 border-b border-line px-3 py-2.5 last:border-b-0" data-status={status}>
+      <span className="mt-0.5 grid size-9 shrink-0 place-items-center overflow-hidden rounded border border-line bg-surface-sunken">
+        <span className="font-mono text-2xs text-muted">{extOf(name)}</span>
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <p className="truncate text-sm text-ink" title={name}>
             {name}
           </p>
-          <StatusBadge tone={statusToneFor(status)}>{status}</StatusBadge>
+          <StatusBadge tone={tone}>{status}</StatusBadge>
         </div>
         <p className="mt-0.5 truncate font-mono text-2xs text-muted">
           {detail}
-          {saved ? (
-            <span className="ml-2 text-ok">
-              saved {formatBytes(saved.bytes)} ({saved.percent > 0 ? "+" : ""}
-              {saved.percent.toFixed(1)}%)
-            </span>
-          ) : null}
+          {note ? <span className="ml-2 text-ink-soft">{note}</span> : null}
         </p>
         {error ? (
           <p className="mt-1 flex items-start gap-1.5 text-xs text-danger">
@@ -60,19 +50,15 @@ export function FileRow({
             <span>{error}</span>
           </p>
         ) : null}
+        {error && hint ? <p className="mt-0.5 pl-[1.125rem] text-xs leading-relaxed text-muted">{hint}</p> : null}
       </div>
-      <div className="flex shrink-0 items-center gap-1">
-        {onRetry ? (
-          <IconButton label={`Retry ${name}`} onClick={onRetry}>
-            <RotateCcw className="size-3.5" />
-          </IconButton>
-        ) : null}
-        {onRemove ? (
+      {onRemove ? (
+        <div className="flex shrink-0 items-center gap-1">
           <IconButton label={`Remove ${name}`} onClick={onRemove}>
-            <X className="size-3.5" />
+            <X className="size-3.5" aria-hidden />
           </IconButton>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
     </li>
   );
 }
@@ -81,4 +67,3 @@ function extOf(name: string): string {
   const match = /\.([a-z0-9]{2,5})$/i.exec(name);
   return (match?.[1] ?? "file").toUpperCase();
 }
-

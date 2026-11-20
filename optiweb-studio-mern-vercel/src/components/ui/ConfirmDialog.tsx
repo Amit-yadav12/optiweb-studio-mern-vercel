@@ -93,7 +93,7 @@ export function ConfirmDialog({
             aria-label="Close dialog"
             className="-mt-1 -mr-1 grid size-8 place-items-center rounded text-muted hover:bg-surface-sunken hover:text-ink"
           >
-            <X className="size-4" />
+            <X className="size-4" aria-hidden />
           </button>
         </div>
         <p id="confirm-description" className="mt-2 text-sm leading-relaxed text-muted">

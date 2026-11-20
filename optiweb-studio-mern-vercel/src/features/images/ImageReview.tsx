@@ -1,366 +1,297 @@
-import { Download, Package, RotateCcw } from "lucide-react";
-import { Button, ButtonLink, buttonClass } from "@/components/ui/Button";
+import { useState } from "react";
+import { Download, Package, RotateCcw, Undo2 } from "lucide-react";
+import { Button } from "@/components/ui/Button";
 import { Notice, StatusBadge } from "@/components/ui/Feedback";
-import { DefinitionRow, Panel, PanelHeader, StatStrip, TableShell, Td, Th } from "@/components/ui/Layout";
+import { DefinitionRow, FormatTag, Panel, PanelHeader, StatStrip, TableShell, Td, Th } from "@/components/ui/Layout";
 import { SavingsChart } from "@/components/charts/SavingsChart";
 import { CompareSlider } from "@/features/images/CompareSlider";
-import type { LocalOutput } from "@/features/images/localOutput";
-import { describeImageOutcome, type ImageOutcome } from "@/features/images/outcome";
-import { artifactUrl } from "@/lib/api-client";
+import { FORMAT_LABEL } from "@/features/images/engine/plan";
+import { chosenCandidate, convertedIsNotSmaller, finalOf, type BatchSummary, type FinalFile, type OptimizerItem } from "@/features/images/model";
+import { saveBlob } from "@/lib/download";
+import { useObjectUrl } from "@/lib/useObjectUrl";
 import { formatBytes, formatDimensions, formatDuration, formatSavingsPercent } from "@/lib/format";
-import type { ImageOptimizeResponse, ImageResult } from "@/types/domain";
 
-export type ItemStatus = "ready" | "uploading" | "processing" | "completed" | "failed";
+/** How many result cards, each with two decoded previews, are shown before "Show more". */
+const CARDS_PER_PAGE = 6;
 
-/** One queued upload and, once processed, its result. */
-export type OptimizerItem = {
-  key: string;
-  file: File;
-  status: ItemStatus;
-  preview: string;
-  result?: ImageResult;
-  /** ID of the stored output file. Set by `settleResult`; null or absent when the output was not stored. */
-  artifactId?: string | null;
-  /**
-   * The converted file held in this tab, for a result that was not stored but
-   * whose bytes came with the response. Never set together with `artifactId`.
-   */
-  localOutput?: LocalOutput | null;
-  error?: string;
-};
-
-/**
- * States the outcome of a run in one place: converted and stored, converted
- * but not stored, or conversion failed.
- */
-export function ImageOutcomeNotice({ outcome }: { outcome: ImageOutcome }) {
-  const failure = outcome.storageFailure;
-  // A storage failure is the subject of the notice only when files were
-  // converted. When nothing was converted it is a secondary remark.
-  const storageIsTheProblem = outcome.kind === "converted_not_stored";
-  return (
-    <Notice
-      tone={outcome.tone}
-      title={outcome.title}
-      hint={storageIsTheProblem ? failure?.hint : null}
-      code={storageIsTheProblem ? failure?.category : null}
-      action={
-        outcome.historyJobId && outcome.kind === "stored" ? (
-          <ButtonLink href={`/app/history/${outcome.historyJobId}`} variant="secondary" size="sm">
-            Open this job in History
-          </ButtonLink>
-        ) : undefined
-      }
-    >
-      <p>{outcome.message}</p>
-      {storageIsTheProblem && failure ? <p className="mt-1">Reason: {failure.message}</p> : null}
-      {outcome.kind === "conversion_failed" && failure ? (
-        <p className="mt-1 text-xs text-ink-soft">This attempt was not recorded in History either. {failure.message}</p>
-      ) : null}
-    </Notice>
-  );
-}
-
-/**
- * Results of the optimization queue. The banner, badges and totals describe
- * the latest run (`response`). A file has a download in two cases: its output
- * was stored (`item.artifactId`, served by URL), or it was not stored but its
- * bytes came with the response and are held in this tab (`item.localOutput`).
- */
 export function ImageReview({
-  response,
   items,
+  summary,
   zipping,
+  busy,
   onDownloadAll,
-  onDownloadLocal,
+  onPreferOriginal,
   onReset,
 }: {
-  response: ImageOptimizeResponse;
   items: OptimizerItem[];
+  summary: BatchSummary;
   zipping: boolean;
-  /** Receives the IDs of the stored output files. */
-  onDownloadAll: (artifactIds: string[]) => void;
-  /** Receives the unstored files held in this tab. */
-  onDownloadLocal: (outputs: LocalOutput[]) => void;
+  busy: boolean;
+  onDownloadAll: () => void;
+  onPreferOriginal: (id: string, value: boolean) => void;
   onReset: () => void;
 }) {
-  const outcome = describeImageOutcome(response);
-  const completed = items.filter((item) => item.status === "completed" && item.result);
-  const failed = items.filter((item) => item.status === "failed");
-  const artifactIdOf = (item: OptimizerItem): string | null => item.artifactId ?? null;
-  const localOutputOf = (item: OptimizerItem): LocalOutput | null => (artifactIdOf(item) === null ? item.localOutput ?? null : null);
-  const storedIds = completed.map(artifactIdOf).filter((id): id is string => id !== null);
-  const localOutputs = completed.map(localOutputOf).filter((output): output is LocalOutput => output !== null);
-  // A queue can hold stored files from one run and unstored files from another.
-  const bothKinds = storedIds.length > 1 && localOutputs.length > 1;
+  const [cards, setCards] = useState(CARDS_PER_PAGE);
+  const finished = items.map((item) => ({ item, final: finalOf(item) })).filter((entry): entry is { item: OptimizerItem; final: FinalFile } => entry.final !== null);
+  const unfinished = items.filter((item) => item.status === "failed" || item.status === "cancelled");
+  const larger = finished.filter(({ final }) => final.grew);
 
   return (
-    <section aria-labelledby="review-panel" className="animate-fade-up flex flex-col gap-6">
-      <Panel aria-labelledby="review-panel">
+    <section className="animate-fade-up flex flex-col gap-6" aria-labelledby="review-panel" data-testid="review">
+      <Panel>
         <PanelHeader
           id="review-panel"
           title="3 · Review results"
-          description="Every value below was measured from the produced buffers."
-          meta={
-            <span className="flex flex-wrap items-center gap-1.5">
-              <StatusBadge tone={outcome.conversion.tone}>{outcome.conversion.label}</StatusBadge>
-              <StatusBadge tone={outcome.storage.tone}>{outcome.storage.label}</StatusBadge>
-            </span>
-          }
+          description="Sizes are the real byte counts of your file and of the file this browser produced."
           actions={
-            <div className="flex flex-wrap items-center gap-2">
-              {storedIds.length > 1 ? (
-                <Button variant="secondary" size="sm" onClick={() => onDownloadAll(storedIds)} loading={zipping} leading={<Package className="size-3.5" aria-hidden />}>
-                  {bothKinds ? "Download stored files (ZIP)" : "Download all (ZIP)"}
-                </Button>
-              ) : null}
-              {localOutputs.length > 1 ? (
-                <Button variant="secondary" size="sm" onClick={() => onDownloadLocal(localOutputs)} loading={zipping} leading={<Package className="size-3.5" aria-hidden />}>
-                  {bothKinds ? "Download unstored files (ZIP)" : "Download all (ZIP)"}
+            <>
+              {finished.length > 0 ? (
+                <Button variant="secondary" size="sm" onClick={onDownloadAll} loading={zipping} disabled={busy} leading={<Package className="size-3.5" aria-hidden />}>
+                  Download all (ZIP)
                 </Button>
               ) : null}
               <Button variant="ghost" size="sm" onClick={onReset} leading={<RotateCcw className="size-3.5" aria-hidden />}>
-                Optimize another file
+                Start over
               </Button>
-            </div>
+            </>
           }
         />
-        <div className="mb-4">
-          <ImageOutcomeNotice outcome={outcome} />
-        </div>
         <StatStrip
           items={[
-            { label: "Input", value: formatBytes(response.totals.inputBytes), hint: `${response.results.length} files submitted` },
-            { label: "Output", value: formatBytes(response.totals.outputBytes), hint: `${completed.length} converted` },
+            { label: "Input", value: formatBytes(summary.inputBytes), hint: `${summary.done} file${summary.done === 1 ? "" : "s"} with a result` },
+            { label: "Output", value: formatBytes(summary.outputBytes), hint: `${summary.converted} converted${summary.keptOriginal > 0 ? ` · ${summary.keptOriginal} original kept` : ""}` },
             {
               label: "Saved",
-              value: formatBytes(response.totals.savedBytes),
-              hint: formatSavingsPercent(response.totals.savingsPercent),
+              value: summary.done > 0 ? `${formatBytes(summary.savedBytes)} (${formatSavingsPercent(summary.savingsPercent)})` : "—",
+              hint: summary.savedBytes < 0 ? "the output is larger" : "measured, not estimated",
             },
-            { label: "Failed", value: String(failed.length), hint: failed.length > 0 ? "details below" : "nothing rejected" },
+            { label: "Not finished", value: String(summary.failed + summary.cancelled), hint: summary.failed + summary.cancelled > 0 ? "details below" : "nothing failed" },
           ]}
         />
-        {completed.length > 0 ? (
-          <div className="mt-5 border border-line">
-            <p className="border-b border-line px-4 py-2.5 text-2xs font-medium tracking-[0.1em] text-muted uppercase">
-              Weight comparison
-            </p>
-            <div className="p-4">
-              <SavingsChart
-                rows={completed.map((item) => ({
-                  label: shorten(item.file.name),
-                  input: item.result!.inputBytes,
-                  output: item.result!.outputBytes,
-                }))}
-                max={Math.max(...completed.map((item) => item.result!.inputBytes))}
-              />
-            </div>
+
+        {larger.length > 0 ? (
+          <div className="mt-4">
+            <Notice tone="warn" title={`${larger.length} result${larger.length === 1 ? " is" : "s are"} larger than the original`}>
+              <p>
+                Re-encoding does not always help: a file that is already well compressed, or a flat graphic stored as PNG, can grow. For each such file
+                you can keep the original instead. The <span className="font-medium">No-regression</span> strategy does that for you.
+              </p>
+            </Notice>
+          </div>
+        ) : null}
+
+        {finished.length > 0 ? (
+          <div className="mt-5">
+            <SavingsChart rows={finished.slice(0, 12).map(({ item, final }) => ({ label: shorten(item.file.name), input: item.file.size, output: final.bytes }))} />
+            {finished.length > 12 ? <p className="mt-2 text-2xs text-muted">The chart shows the first 12 files. The table lists all {finished.length}.</p> : null}
           </div>
         ) : null}
       </Panel>
 
-      {failed.length > 0 ? (
+      {unfinished.length > 0 ? (
         <Panel>
-          <PanelHeader title="Rejected files" description="These uploads were not converted. The rest of the batch is unaffected." />
-          <ul className="flex flex-col gap-2">
-            {failed.map((item) => (
-              <li key={item.key} className="border border-danger-border bg-danger-soft px-3 py-2.5">
-                <p className="truncate text-sm text-ink">{item.file.name}</p>
-                <p className="mt-0.5 text-xs text-danger/85">{item.error}</p>
+          <PanelHeader title="Files without a result" description="These files were not converted. The other files are not affected." />
+          <ul className="flex flex-col divide-y divide-line border border-line" data-testid="unfinished">
+            {unfinished.map((item) => (
+              <li key={item.id} className="px-3 py-2.5">
+                <p className="text-sm text-ink">
+                  <span className="font-medium">{item.file.name}</span>
+                  <span className="ml-2 font-mono text-2xs text-muted">{item.status === "cancelled" ? "cancelled" : "failed"}</span>
+                </p>
+                <p className="mt-0.5 text-xs text-danger">{item.status === "cancelled" ? "Stopped before it finished." : item.problem?.message}</p>
+                {item.problem?.hint ? <p className="mt-0.5 text-xs text-muted">{item.problem.hint}</p> : null}
               </li>
             ))}
           </ul>
         </Panel>
       ) : null}
 
-      {completed.length > 0 ? (
-        <>
-          <Panel padded={false}>
-            <div className="px-4 pt-4 sm:px-5">
-              <PanelHeader title="Batch table" description="Aligned figures for scanning a large batch." />
-            </div>
-            <TableShell minWidth={760}>
-              <thead>
-                <tr>
-                  <Th>File</Th>
-                  <Th numeric>Before</Th>
-                  <Th numeric>After</Th>
-                  <Th numeric>Saved</Th>
-                  <Th numeric>Dimensions</Th>
-                  <Th>Format</Th>
-                  <Th numeric>Time</Th>
-                  <Th numeric>Download</Th>
+      {finished.length > 0 ? (
+        <Panel padded={false}>
+          <div className="px-4 pt-4 sm:px-5">
+            <PanelHeader title="Batch table" description="One row per file. Download a single file, or keep the original where the result is larger." />
+          </div>
+          <TableShell minWidth={860}>
+            <thead>
+              <tr>
+                <Th>File</Th>
+                <Th numeric>Before</Th>
+                <Th numeric>After</Th>
+                <Th numeric>Saved</Th>
+                <Th numeric>Dimensions</Th>
+                <Th>Format</Th>
+                <Th numeric>Time</Th>
+                <Th numeric>Download</Th>
+              </tr>
+            </thead>
+            <tbody data-testid="results">
+              {finished.map(({ item, final }) => (
+                <tr key={item.id} data-result={final.isOriginal ? "original" : final.grew ? "larger" : "smaller"}>
+                  <Td>
+                    <span className="block max-w-[14rem] truncate text-ink" title={item.file.name}>
+                      {item.file.name}
+                    </span>
+                    <span className="block max-w-[14rem] truncate font-mono text-2xs text-muted" title={final.filename}>
+                      {final.isOriginal ? "original kept" : final.filename}
+                    </span>
+                  </Td>
+                  <Td numeric>{formatBytes(item.file.size)}</Td>
+                  <Td numeric>{formatBytes(final.bytes)}</Td>
+                  <Td numeric>
+                    <span className={final.grew ? "text-danger" : final.savedBytes > 0 ? "text-ok" : "text-ink-soft"}>{final.isOriginal ? "0%" : formatSavingsPercent(final.savingsPercent)}</span>
+                  </Td>
+                  <Td numeric>{formatDimensions(final.width, final.height)}</Td>
+                  <Td>
+                    <FormatTag>{final.formatLabel}</FormatTag>
+                  </Td>
+                  <Td numeric>{formatDuration(item.outcome?.durationMs ?? 0)}</Td>
+                  <Td numeric>
+                    <span className="inline-flex items-center justify-end gap-1.5">
+                      {convertedIsNotSmaller(item) ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => onPreferOriginal(item.id, !item.outcome?.preferOriginal)}
+                          leading={<Undo2 className="size-3.5" aria-hidden />}
+                          aria-label={item.outcome?.preferOriginal ? `Use the converted file for ${item.file.name}` : `Keep the original for ${item.file.name}`}
+                        >
+                          {item.outcome?.preferOriginal ? "Use converted" : "Keep original"}
+                        </Button>
+                      ) : null}
+                      <Button variant="secondary" size="sm" onClick={() => saveBlob(final.blob, final.filename)} leading={<Download className="size-3.5" aria-hidden />} aria-label={`Download ${final.filename}`}>
+                        Save
+                      </Button>
+                    </span>
+                  </Td>
                 </tr>
-              </thead>
-              <tbody>
-                {completed.map((item) => {
-                  const artifactId = artifactIdOf(item);
-                  const local = localOutputOf(item);
-                  return (
-                    <tr key={item.key}>
-                      <Td mono>
-                        <span className="block max-w-[13rem] truncate" title={item.file.name}>
-                          {item.file.name}
-                        </span>
-                      </Td>
-                      <Td numeric>{formatBytes(item.result!.inputBytes)}</Td>
-                      <Td numeric>{formatBytes(item.result!.outputBytes)}</Td>
-                      <Td numeric>
-                        <span className={item.result!.savedBytes >= 0 ? "text-ok" : "text-danger"}>
-                          {formatBytes(item.result!.savedBytes)}
-                        </span>
-                        <span className="ml-1.5 text-muted">{formatSavingsPercent(item.result!.savingsPercent)}</span>
-                      </Td>
-                      <Td numeric>{formatDimensions(item.result!.outputWidth, item.result!.outputHeight)}</Td>
-                      <Td mono>{item.result!.outputFormat}</Td>
-                      <Td numeric>{formatDuration(item.result!.durationMs)}</Td>
-                      <Td numeric>
-                        {artifactId ? (
-                          <a
-                            className="inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:text-accent-hover hover:underline"
-                            href={artifactUrl(artifactId)}
-                            download
-                          >
-                            <Download className="size-3.5" aria-hidden />
-                            Save
-                          </a>
-                        ) : local ? (
-                          <a
-                            className="inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:text-accent-hover hover:underline"
-                            href={local.url}
-                            download={local.filename}
-                          >
-                            <Download className="size-3.5" aria-hidden />
-                            Save
-                          </a>
-                        ) : (
-                          <span className="text-xs text-muted">Not stored</span>
-                        )}
-                      </Td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </TableShell>
-          </Panel>
+              ))}
+            </tbody>
+          </TableShell>
+        </Panel>
+      ) : null}
 
-          <div className="grid gap-4 xl:grid-cols-2">
-            {completed.map((item) => (
-              <ResultCard key={item.key} item={item} artifactId={artifactIdOf(item)} local={localOutputOf(item)} />
+      {finished.length > 0 ? (
+        <div>
+          <div className="grid gap-5 xl:grid-cols-2">
+            {finished.slice(0, cards).map(({ item, final }) => (
+              <ResultCard key={item.id} item={item} final={final} />
             ))}
           </div>
-        </>
+          {finished.length > cards ? (
+            <div className="mt-4 flex items-center gap-3">
+              <Button variant="secondary" size="sm" onClick={() => setCards((value) => value + CARDS_PER_PAGE)}>
+                Show {Math.min(CARDS_PER_PAGE, finished.length - cards)} more previews
+              </Button>
+              <p className="text-xs text-muted">
+                Previews are decoded images held in memory, so they are shown a few at a time. {cards} of {finished.length} shown.
+              </p>
+            </div>
+          ) : null}
+        </div>
       ) : null}
     </section>
   );
 }
 
-/**
- * `artifactId` is the stored output file, or null when this result was not
- * stored. `local` is the copy held in this tab for an unstored result, or null.
- */
-function ResultCard({ item, artifactId, local }: { item: OptimizerItem; artifactId: string | null; local: LocalOutput | null }) {
-  const result = item.result!;
-  // Where the converted image is read from: the stored file, or the copy in this tab.
-  const outputSrc = artifactId ? artifactUrl(artifactId, false) : local ? local.url : null;
-  const sameAspect =
-    result.inputWidth &&
-    result.inputHeight &&
-    result.outputWidth &&
-    result.outputHeight &&
-    Math.abs(result.inputWidth / result.inputHeight - result.outputWidth / result.outputHeight) < 0.01;
+function ResultCard({ item, final }: { item: OptimizerItem; final: FinalFile }) {
+  const outcome = item.outcome;
+  const source = item.source;
+  // Both previews point at Blobs in this tab. The URLs are released when the card leaves the page.
+  const beforeUrl = useObjectUrl(item.file);
+  const afterUrl = useObjectUrl(final.isOriginal ? null : final.blob);
+  if (!outcome || !source) return null;
+  const chosen = chosenCandidate(outcome);
+  const sameShape = !final.isOriginal && Math.abs(source.width / source.height - final.width / final.height) < 0.01;
+  const candidates = [
+    ...outcome.result.candidates.map((candidate, index) => ({
+      key: `c${index}`,
+      label: FORMAT_LABEL[candidate.format],
+      note: candidate.problem ? `${candidate.note} — ${candidate.problem}` : candidate.note,
+      bytes: candidate.blob?.size ?? null,
+      chosen: candidate === chosen && !final.isOriginal,
+      detail: candidate.blob ? `${formatDuration(candidate.ms)} · ${candidate.encoder === "wasm" ? "WebAssembly codec" : "browser encoder"}` : null,
+    })),
+    ...outcome.skipped.map((skipped, index) => ({ key: `s${index}`, label: FORMAT_LABEL[skipped.format], note: skipped.note, bytes: null as number | null, chosen: false, detail: null as string | null })),
+  ];
 
   return (
-    <Panel as="article" aria-label={`Result for ${item.file.name}`}>
+    <Panel as="article" className="min-w-0">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-ink" title={item.file.name}>
+          <h3 className="truncate text-sm font-medium text-ink" title={item.file.name}>
             {item.file.name}
-          </p>
-          <p className="mt-0.5 truncate font-mono text-2xs text-muted" title={result.outputFilename}>
-            {result.outputFilename}
+          </h3>
+          <p className="mt-0.5 truncate font-mono text-2xs text-muted" title={final.filename}>
+            {final.isOriginal ? "original kept" : final.filename}
           </p>
         </div>
-        <StatusBadge tone={result.savedBytes >= 0 ? "ok" : "danger"}>
-          {formatSavingsPercent(result.savingsPercent)}
-        </StatusBadge>
+        <StatusBadge tone={final.isOriginal ? "neutral" : final.grew ? "danger" : "ok"}>{final.isOriginal ? "original" : formatSavingsPercent(final.savingsPercent)}</StatusBadge>
       </div>
 
       <div className="mt-4">
-        {outputSrc && sameAspect ? (
-          <CompareSlider
-            beforeSrc={item.preview}
-            afterSrc={outputSrc}
-            alt={item.file.name}
-            width={result.outputWidth ?? 1}
-            height={result.outputHeight ?? 1}
-          />
-        ) : (
+        {final.isOriginal ? (
+          <div className="rounded-md border border-line bg-surface-sunken px-3 py-3 text-xs leading-relaxed text-ink-soft" role="status">
+            {final.originalReason} The download is your file, unchanged.
+          </div>
+        ) : beforeUrl && afterUrl && sameShape ? (
+          <CompareSlider beforeSrc={beforeUrl} afterSrc={afterUrl} alt={item.file.name} width={final.width} height={final.height} />
+        ) : beforeUrl && afterUrl ? (
           <div className="checker grid grid-cols-2 gap-px overflow-hidden rounded-md border border-line">
             <figure className="grid place-items-center p-2">
-              <img src={item.preview} alt={`Original ${item.file.name}`} className="max-h-40 w-auto max-w-full object-contain" />
+              <img src={beforeUrl} alt={`Original ${item.file.name}`} className="max-h-40 w-auto max-w-full object-contain" />
               <figcaption className="mt-1.5 font-mono text-2xs text-muted">original</figcaption>
             </figure>
             <figure className="grid place-items-center border-l border-line p-2">
-              {outputSrc ? (
-                <img
-                  src={outputSrc}
-                  alt={`Optimized ${item.file.name}`}
-                  className="max-h-40 w-auto max-w-full object-contain"
-                />
-              ) : (
-                <p className="px-3 text-center text-xs text-muted">No preview. The converted file was not stored.</p>
-              )}
+              <img src={afterUrl} alt={`Optimized ${item.file.name}`} className="max-h-40 w-auto max-w-full object-contain" />
               <figcaption className="mt-1.5 font-mono text-2xs text-muted">optimized</figcaption>
             </figure>
           </div>
-        )}
+        ) : null}
       </div>
 
       <dl className="mt-4">
-        <DefinitionRow label="Original size" value={formatBytes(result.inputBytes)} />
-        <DefinitionRow label="Optimized size" value={formatBytes(result.outputBytes)} />
+        <DefinitionRow label="Original size" value={formatBytes(item.file.size)} />
+        <DefinitionRow label={final.isOriginal ? "Offered file" : "Optimized size"} value={formatBytes(final.bytes)} />
         <DefinitionRow
           label="Saved"
-          value={
-            <span className={result.savedBytes >= 0 ? "text-ok" : "text-danger"}>
-              {formatBytes(result.savedBytes)} ({formatSavingsPercent(result.savingsPercent)})
-            </span>
-          }
+          value={<span className={final.grew ? "text-danger" : final.savedBytes > 0 ? "text-ok" : ""}>{final.isOriginal ? "0 B (0%)" : `${formatBytes(final.savedBytes)} (${formatSavingsPercent(final.savingsPercent)})`}</span>}
         />
-        <DefinitionRow
-          label="Dimensions"
-          value={`${formatDimensions(result.inputWidth, result.inputHeight)} → ${formatDimensions(result.outputWidth, result.outputHeight)}`}
-        />
-        <DefinitionRow label="Output format" value={`${result.outputFormat} · ${formatDuration(result.durationMs)}`} />
+        <DefinitionRow label="Dimensions" value={`${formatDimensions(source.width, source.height)} to ${formatDimensions(final.width, final.height)}`} />
+        <DefinitionRow label="Format" value={`${source.format.toUpperCase()} to ${final.formatLabel}`} />
       </dl>
 
-      <div className="mt-4 flex flex-wrap gap-2">
-        {artifactId ? (
-          <>
-            <a className={buttonClass({ variant: "primary", size: "sm" })} href={artifactUrl(artifactId)} download>
-              <Download className="size-3.5" aria-hidden />
-              Download
-            </a>
-            <ButtonLink href={`/app/assets?inspect=${artifactId}`} variant="ghost" size="sm">
-              Inspect
-            </ButtonLink>
-          </>
-        ) : local ? (
-          <>
-            <a className={buttonClass({ variant: "primary", size: "sm" })} href={local.url} download={local.filename}>
-              <Download className="size-3.5" aria-hidden />
-              Download
-            </a>
-            <p className="self-center text-xs text-muted">Not stored. This copy is kept only in this tab.</p>
-          </>
-        ) : (
-          <p className="text-xs text-muted">
-            {result.inlineSkipped === "too_large"
-              ? "Not stored, and too large to send back with the results, so there is no file to download."
-              : "Not stored, so there is no file to download."}
-          </p>
-        )}
+      {outcome.result.flattened && final.format === "jpeg" ? <p className="mt-3 text-xs text-warn">This image had transparent areas. JPEG cannot store them, so they are white in the result.</p> : null}
+      {source.metadata.gps && !final.isOriginal ? <p className="mt-3 text-xs text-muted">The original carries a GPS location in its metadata. The converted file does not.</p> : null}
+
+      {candidates.length > 1 || final.isOriginal ? (
+        <div className="mt-4 border-t border-line pt-3">
+          <p className="text-2xs font-medium tracking-[0.1em] text-muted uppercase">Formats compared</p>
+          <ul className="mt-2 flex flex-col gap-1">
+            {candidates.map((candidate) => (
+              <li key={candidate.key} className="flex items-baseline justify-between gap-3 text-xs">
+                <span className={candidate.chosen ? "font-medium text-ink" : "text-ink-soft"}>
+                  {candidate.note}
+                  {candidate.chosen ? " · chosen" : ""}
+                </span>
+                <span className="shrink-0 font-mono text-2xs text-muted tnum">
+                  {candidate.bytes !== null ? formatBytes(candidate.bytes) : "—"}
+                  {candidate.detail ? ` · ${candidate.detail}` : ""}
+                </span>
+              </li>
+            ))}
+            <li className="flex items-baseline justify-between gap-3 text-xs">
+              <span className={final.isOriginal ? "font-medium text-ink" : "text-ink-soft"}>original file{final.isOriginal ? " · kept" : ""}</span>
+              <span className="shrink-0 font-mono text-2xs text-muted tnum">{formatBytes(item.file.size)}</span>
+            </li>
+          </ul>
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <Button variant="primary" size="sm" onClick={() => saveBlob(final.blob, final.filename)} leading={<Download className="size-3.5" aria-hidden />}>
+          {final.isOriginal ? "Download original" : "Download"}
+        </Button>
+        <p className="text-xs text-muted">Saved from this tab's memory. No request is made.</p>
       </div>
     </Panel>
   );
@@ -368,6 +299,7 @@ function ResultCard({ item, artifactId, local }: { item: OptimizerItem; artifact
 
 function shorten(name: string, max = 16): string {
   if (name.length <= max) return name;
-  const ext = name.slice(name.lastIndexOf("."));
-  return `${name.slice(0, max - ext.length - 1)}…${ext}`;
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 ? name.slice(dot) : "";
+  return `${name.slice(0, Math.max(1, max - ext.length - 1))}…${ext}`;
 }

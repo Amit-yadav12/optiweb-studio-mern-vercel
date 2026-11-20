@@ -6,7 +6,7 @@
 
 [functions]
   node_bundler = "esbuild"
-  external_node_modules = ["express", "mongoose", "sharp"]
+  external_node_modules = ["express"]
 
 [dev]
   command = "npm run dev:client"
@@ -15,12 +15,23 @@
   framework = "vite"
   autoLaunch = false
 
+# The API is one function. It answers JSON only and accepts no files.
 [[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/api/:splat"
   status = 200
   force = true
 
+# A build file that does not exist is a 404, not the app's page: a browser
+# that asks for a script must never be handed HTML. Without `force`, Netlify
+# applies a redirect only when no file exists at the path, so real files under
+# /assets are served as they are.
+[[redirects]]
+  from = "/assets/*"
+  to = "/asset-not-found.txt"
+  status = 404
+
+# Every other path is a page of the single-page app.
 [[redirects]]
   from = "/*"
   to = "/index.html"
@@ -31,9 +42,14 @@
   [headers.values]
     Cache-Control = "public, max-age=31536000, immutable"
 
+# Keep these equal to src/server/config/securityHeaders.ts and vercel.json.
+# `npm run test:security` fails when they differ.
 [[headers]]
   for = "/*"
   [headers.values]
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
     X-Frame-Options = "DENY"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    Cross-Origin-Opener-Policy = "same-origin"
